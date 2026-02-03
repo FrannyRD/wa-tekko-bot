@@ -1,5 +1,5 @@
 {
-  "name": "tekko-wa-bot",
+  "name": "wa-tekko-bot",
   "version": "1.0.0",
   "type": "module",
   "main": "index.js",
