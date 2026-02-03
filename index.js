@@ -19,7 +19,7 @@ const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4.1-mini";
 
 // Branding / Ops
 const BRAND_NAME = process.env.BRAND_NAME || "Tekko";
-const ADMIN_PHONE = process.env.ADMIN_PHONE || ""; // e.g. 1809XXXXXXX (E.164 digits only preferred)
+const ADMIN_PHONE = process.env.ADMIN_PHONE || ""; // e.g. 1809XXXXXXX (digits only preferred)
 const DEFAULT_COUNTRY_HINT = process.env.DEFAULT_COUNTRY_HINT || "República Dominicana";
 
 // =====================================================
@@ -148,12 +148,16 @@ function isGreeting(tNorm) {
 
 function isHumanRequest(tNorm) {
   const t = tNorm || "";
-  return ["humano", "asesor", "persona", "hablar contigo", "llamar", "telefono", "llamada"].some((k) => t.includes(k));
+  return ["humano", "asesor", "persona", "hablar contigo", "llamar", "telefono", "teléfono", "llamada", "agente"].some(
+    (k) => t.includes(k)
+  );
 }
 
 function isPricingIntent(tNorm) {
   const t = tNorm || "";
-  return ["precio", "cuanto cuesta", "costo", "inversion", "cotizacion", "tarifa", "planes"].some((k) => t.includes(k));
+  return ["precio", "cuanto cuesta", "costo", "inversion", "cotizacion", "cotización", "tarifa", "planes"].some((k) =>
+    t.includes(k)
+  );
 }
 
 function isDemoIntent(tNorm) {
@@ -164,6 +168,16 @@ function isDemoIntent(tNorm) {
 function safeText(x, max = 400) {
   const s = (x || "").toString().trim();
   return s.length > max ? s.slice(0, max) + "…" : s;
+}
+
+function prettyPhoneForUserDigitsOnly(digits) {
+  if (!digits) return "";
+  const d = digits.toString().replace(/[^\d]/g, "");
+  if (!d) return "";
+  // Mostrar con + (solo visual)
+  return d.startsWith("1") || d.startsWith("34") || d.startsWith("52") || d.startsWith("57") || d.startsWith("58") || d.startsWith("51") || d.startsWith("53")
+    ? `+${d}`
+    : `+${d}`; // mantener simple
 }
 
 // =====================================================
@@ -235,7 +249,7 @@ async function waSendList(to, headerText, bodyText, buttonText, sectionTitle, ro
               title: sectionTitle || "Opciones",
               rows: rows.map((r) => ({
                 id: r.id,
-                title: clampTitle(r.title), // ✅ aquí el cambio
+                title: clampTitle(r.title),
                 description: r.description || "",
               })),
             },
@@ -452,6 +466,18 @@ async function sendObjectiveMenu(to) {
   );
 }
 
+// ✅ WHATSAPP ONLY: ya no preguntamos canales (se fija automático)
+async function sendChannelsMenu(to) {
+  await waSendList(
+    to,
+    "Canales",
+    "¿Dónde quieres el bot?",
+    "Elegir",
+    "Canales",
+    [{ id: "ch_whatsapp", title: "WhatsApp" }]
+  );
+}
+
 async function sendVolumeMenu(to) {
   await waSendList(
     to,
@@ -525,6 +551,9 @@ function mapIdToLabel(id) {
     obj_soporte: "Soporte / seguimiento",
     obj_otro: "Otro",
 
+    // ✅ WHATSAPP ONLY
+    ch_whatsapp: "WhatsApp",
+
     vol_0_20: "0–20",
     vol_20_50: "20–50",
     vol_50_100: "50–100",
@@ -581,7 +610,7 @@ async function stepAskNext(to, session) {
     return;
   }
 
-  // ✅ SOLO WHATSAPP: removimos Instagram/Facebook del flujo
+  // ✅ WHATSAPP ONLY: fijar canal automáticamente (sin preguntar)
   if (!session.channels) {
     session.channels = "WhatsApp";
   }
@@ -631,9 +660,8 @@ async function stepAskNext(to, session) {
   session.state = "done";
   await waSendText(
     to,
-    `✅ Perfecto, ya tengo lo necesario.\n\nEn breve te enviamos una recomendación y próximos pasos.\nSi deseas, también puedo pasarte con un asesor ahora mismo.`
+    `✅ Perfecto, ya tengo lo necesario.\n\nEn breve te enviamos una recomendación y próximos pasos.\n\nSi deseas hablar con un asesor, escribe *Humano*.`
   );
-  await sendCloseMenu(to);
 
   // notify admin with summary
   await notifyAdmin(session, to);
@@ -710,13 +738,26 @@ app.post("/webhook", async (req, res) => {
     // Quick intents
     if (isHumanRequest(tNorm)) {
       session.goal = "Hablar con humano";
-      await waSendText(from, `Claro ✅ Te paso con un asesor.\nDime en una línea qué necesitas (tipo de bot y negocio).`);
+
+      const direct = ADMIN_PHONE ? prettyPhoneForUserDigitsOnly(ADMIN_PHONE) : "";
+      const directLine = direct ? `\n\n📞 Contacto directo: *${direct}*` : "";
+
+      await waSendText(
+        from,
+        `Claro ✅ Te paso con un asesor.${directLine}\n\nDime en una línea qué necesitas (tipo de bot y negocio).`
+      );
+
       await notifyAdmin({ ...session, notes: (session.notes || "") + " | Pidió HUMANO (keyword)" }, from);
       return res.sendStatus(200);
     }
 
     // Anti-raro phrase handling
-    if (tNorm.includes("como vendes") || tNorm.includes("y tu no tienes") || tNorm.includes("raro") || tNorm.includes("no tienes uno")) {
+    if (
+      tNorm.includes("como vendes") ||
+      tNorm.includes("y tu no tienes") ||
+      tNorm.includes("raro") ||
+      tNorm.includes("no tienes uno")
+    ) {
       await waSendText(from, antiRaroText());
       // keep funnel
       if (!session.goal) session.goal = "Quiero un bot";
@@ -753,7 +794,7 @@ app.post("/webhook", async (req, res) => {
       return res.sendStatus(200);
     }
 
-    // Close choices
+    // Close choices (si llegan por botones viejos)
     if (["close_demo", "close_quote", "close_human"].includes(userText)) {
       await handleCloseChoice(from, session, userText);
       return res.sendStatus(200);
@@ -789,7 +830,7 @@ app.post("/webhook", async (req, res) => {
 
     // Handle structured flow states
     if (session.state === "collect_bot_type") {
-      if (label && label.startsWith("Bot") || label === "Automatizaciones" || label === "No sé / Recomiéndame") {
+      if ((label && label.startsWith("Bot")) || label === "Automatizaciones" || label === "No sé / Recomiéndame") {
         session.botType = label;
         await waSendText(from, `Genial ✅`);
         await stepAskNext(from, session);
@@ -815,6 +856,14 @@ app.post("/webhook", async (req, res) => {
     if (session.state === "collect_objective") {
       if (label) session.objective = label;
       else session.objective = safeText(userText, 120);
+      await waSendText(from, `✅`);
+      await stepAskNext(from, session);
+      return res.sendStatus(200);
+    }
+
+    // ✅ WHATSAPP ONLY: si por alguna razón llega a este estado, lo fija y sigue
+    if (session.state === "collect_channels") {
+      session.channels = "WhatsApp";
       await waSendText(from, `✅`);
       await stepAskNext(from, session);
       return res.sendStatus(200);
@@ -869,13 +918,12 @@ app.post("/webhook", async (req, res) => {
       return res.sendStatus(200);
     }
 
+    // ✅ CAMBIO PRINCIPAL: cuando ya está DONE, NO volver a pedir demo/cotización/humano
     if (session.state === "done") {
-      // If done, treat as notes or AI follow-up
       if (tNorm.length > 2) {
         session.notes = safeText((session.notes ? session.notes + " | " : "") + userText, 400);
-        await waSendText(from, `Perfecto ✅ ¿Quieres *demo*, *cotización* o *humano*?`);
-        await sendCloseMenu(from);
-        await notifyAdmin({ ...session, notes: (session.notes || "") + " | Mensaje post-done" }, from);
+        await waSendText(from, `¡Perfecto! ✅ Lo agregué a tu solicitud.\nEn breve un asesor te contacta.`);
+        await notifyAdmin({ ...session, notes: (session.notes || "") + " | Nota extra post-done" }, from);
         return res.sendStatus(200);
       }
     }
@@ -900,13 +948,25 @@ app.post("/webhook", async (req, res) => {
 
     // After AI, continue funnel if incomplete
     const needsMore =
-      !session.botType || !session.sector || !session.objective || !session.channels || !session.volume || !session.urgency || !session.name || !session.business || !session.city || !session.link;
+      !session.botType ||
+      !session.sector ||
+      !session.objective ||
+      !session.channels ||
+      !session.volume ||
+      !session.urgency ||
+      !session.name ||
+      !session.business ||
+      !session.city ||
+      !session.link;
 
     if (needsMore) {
       await stepAskNext(from, session);
     } else if (session.state !== "done") {
       session.state = "done";
-      await sendCloseMenu(from);
+      await waSendText(
+        from,
+        `✅ Perfecto, ya tengo lo necesario.\n\nEn breve te enviamos una recomendación y próximos pasos.\n\nSi deseas hablar con un asesor, escribe *Humano*.`
+      );
       await notifyAdmin(session, from);
     }
 
