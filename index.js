@@ -211,6 +211,13 @@ async function waSendButtons(to, headerText, bodyText, buttons) {
 async function waSendList(to, headerText, bodyText, buttonText, sectionTitle, rows) {
   // rows: [{id,title,description?}]
   const url = `https://graph.facebook.com/v20.0/${PHONE_NUMBER_ID}/messages`;
+
+  // ✅ FIX: WhatsApp limita row.title a 24 caracteres
+  const clampTitle = (s) => {
+    const t = (s || "").toString().trim();
+    return t.length > 24 ? t.slice(0, 24) : t;
+  };
+
   await axios.post(
     url,
     {
@@ -228,7 +235,7 @@ async function waSendList(to, headerText, bodyText, buttonText, sectionTitle, ro
               title: sectionTitle || "Opciones",
               rows: rows.map((r) => ({
                 id: r.id,
-                title: r.title,
+                title: clampTitle(r.title), // ✅ aquí el cambio
                 description: r.description || "",
               })),
             },
