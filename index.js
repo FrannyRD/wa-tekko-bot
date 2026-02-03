@@ -452,22 +452,6 @@ async function sendObjectiveMenu(to) {
   );
 }
 
-async function sendChannelsMenu(to) {
-  await waSendList(
-    to,
-    "Canales",
-    "¿Dónde quieres el bot?",
-    "Elegir",
-    "Canales",
-    [
-      { id: "ch_whatsapp", title: "WhatsApp" },
-      { id: "ch_instagram", title: "Instagram DM" },
-      { id: "ch_facebook", title: "Facebook Messenger" },
-      { id: "ch_all", title: "Todos" },
-    ]
-  );
-}
-
 async function sendVolumeMenu(to) {
   await waSendList(
     to,
@@ -541,11 +525,6 @@ function mapIdToLabel(id) {
     obj_soporte: "Soporte / seguimiento",
     obj_otro: "Otro",
 
-    ch_whatsapp: "WhatsApp",
-    ch_instagram: "Instagram DM",
-    ch_facebook: "Facebook Messenger",
-    ch_all: "Todos",
-
     vol_0_20: "0–20",
     vol_20_50: "20–50",
     vol_50_100: "50–100",
@@ -602,10 +581,9 @@ async function stepAskNext(to, session) {
     return;
   }
 
+  // ✅ SOLO WHATSAPP: removimos Instagram/Facebook del flujo
   if (!session.channels) {
-    session.state = "collect_channels";
-    await sendChannelsMenu(to);
-    return;
+    session.channels = "WhatsApp";
   }
 
   if (!session.volume) {
@@ -644,7 +622,7 @@ async function stepAskNext(to, session) {
 
   if (!session.link) {
     session.state = "collect_link";
-    session.lastPrompt = `Opcional: pásame tu *Instagram o web* (si tienes) para entender mejor tu caso. Si no, escribe *No tengo*.`;
+    session.lastPrompt = `Opcional: pásame tu *web* (si tienes) para entender mejor tu caso. Si no, escribe *No tengo*.`;
     await waSendText(to, session.lastPrompt);
     return;
   }
@@ -837,14 +815,6 @@ app.post("/webhook", async (req, res) => {
     if (session.state === "collect_objective") {
       if (label) session.objective = label;
       else session.objective = safeText(userText, 120);
-      await waSendText(from, `✅`);
-      await stepAskNext(from, session);
-      return res.sendStatus(200);
-    }
-
-    if (session.state === "collect_channels") {
-      if (label) session.channels = label;
-      else session.channels = safeText(userText, 120);
       await waSendText(from, `✅`);
       await stepAskNext(from, session);
       return res.sendStatus(200);
