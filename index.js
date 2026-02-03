@@ -51,7 +51,7 @@ function getSession(userId) {
       botType: null,
       sector: null,
       objective: null,
-      channels: null,
+      channels: null, // ✅ se mantiene, pero se setea a WhatsApp automáticamente
       volume: null,
       urgency: null,
       name: null,
@@ -148,15 +148,15 @@ function isGreeting(tNorm) {
 
 function isHumanRequest(tNorm) {
   const t = tNorm || "";
-  return ["humano", "asesor", "persona", "hablar contigo", "llamar", "telefono", "teléfono", "llamada", "agente"].some(
+  return ["humano", "asesor", "persona", "agente", "hablar contigo", "hablar con alguien", "llamar", "telefono", "teléfono", "llamada"].some(
     (k) => t.includes(k)
   );
 }
 
 function isPricingIntent(tNorm) {
   const t = tNorm || "";
-  return ["precio", "cuanto cuesta", "costo", "inversion", "cotizacion", "cotización", "tarifa", "planes"].some((k) =>
-    t.includes(k)
+  return ["precio", "cuanto cuesta", "cuánto cuesta", "costo", "inversion", "inversión", "cotizacion", "cotización", "tarifa", "planes"].some(
+    (k) => t.includes(k)
   );
 }
 
@@ -170,14 +170,8 @@ function safeText(x, max = 400) {
   return s.length > max ? s.slice(0, max) + "…" : s;
 }
 
-function prettyPhoneForUserDigitsOnly(digits) {
-  if (!digits) return "";
-  const d = digits.toString().replace(/[^\d]/g, "");
-  if (!d) return "";
-  // Mostrar con + (solo visual)
-  return d.startsWith("1") || d.startsWith("34") || d.startsWith("52") || d.startsWith("57") || d.startsWith("58") || d.startsWith("51") || d.startsWith("53")
-    ? `+${d}`
-    : `+${d}`; // mantener simple
+function digitsOnly(s) {
+  return (s || "").toString().replace(/[^\d]/g, "");
 }
 
 // =====================================================
@@ -249,7 +243,7 @@ async function waSendList(to, headerText, bodyText, buttonText, sectionTitle, ro
               title: sectionTitle || "Opciones",
               rows: rows.map((r) => ({
                 id: r.id,
-                title: clampTitle(r.title),
+                title: clampTitle(r.title), // ✅ aquí el cambio
                 description: r.description || "",
               })),
             },
@@ -274,6 +268,10 @@ function antiRaroText() {
 
 function pricingInfoText() {
   return `💡 Los bots se cotizan según funciones e integraciones.\n\nTenemos 3 niveles:\n• *Starter:* menú + captura de datos\n• *Pro:* ventas/citas + seguimiento\n• *Premium:* IA + integraciones (Sheets/CRM) + automatizaciones\n\n¿Quieres que te recomiende el mejor para tu negocio?`;
+}
+
+function doneCustomerText() {
+  return `✅ Perfecto, ya tengo lo necesario.\n\nEn breve te enviamos una recomendación y próximos pasos.\nSi deseas hablar con un asesor, escribe *Humano* en este chat.`;
 }
 
 // =====================================================
@@ -329,7 +327,7 @@ Objetivo: ayudar al cliente a entender bots/automatización, hacer preguntas par
 Reglas:
 - Responde corto, claro y práctico.
 - NO inventes precios exactos. Si preguntan precio, explica que depende y ofrece rangos/niveles (Starter/Pro/Premium) y pide datos.
-- Pide SOLO datos necesarios (sector, objetivo, canal, volumen, urgencia).
+- Pide SOLO datos necesarios (sector, objetivo, volumen, urgencia). El canal es WhatsApp.
 - Si el usuario pide hablar con humano, confirma y resume.
 - No pidas información sensible.
 - Idioma: español (tono friendly, profesional).
@@ -420,11 +418,11 @@ async function sendBotTypes(to) {
       { id: "bot_sales", title: "🛒 Bot de Ventas", description: "Catálogo, pedidos, carrito, pagos" },
       { id: "bot_appointments", title: "📅 Bot de Citas/Reservas", description: "Agenda automática, recordatorios" },
       { id: "bot_support", title: "🧾 Bot de Soporte", description: "FAQ, seguimiento, reclamos" },
-      { id: "bot_delivery", title: "🏪 Bot Delivery/Restaurante", description: "Menú, pedidos, ubicación" },
+      { id: "bot_delivery", title: "🏪 Bot Delivery/Rest.", description: "Menú, pedidos, ubicación" },
       { id: "bot_services", title: "🧑‍💼 Bot para Servicios", description: "Cotizaciones, formularios, leads" },
       { id: "bot_ai", title: "🧠 Bot con IA", description: "Responde como asesor con tu info" },
       { id: "bot_automations", title: "🔁 Automatizaciones", description: "Sheets/CRM/Notion/Calendar" },
-      { id: "bot_recommend", title: "❓ No sé / Recomiéndame", description: "Te hago 3 preguntas y te digo" },
+      { id: "bot_recommend", title: "❓ No sé / Recom.", description: "Te hago 3 preguntas y te digo" },
     ]
   );
 }
@@ -466,16 +464,9 @@ async function sendObjectiveMenu(to) {
   );
 }
 
-// ✅ WHATSAPP ONLY: ya no preguntamos canales (se fija automático)
+// ✅ Solo WhatsApp (sin Instagram/Facebook como canal del bot)
 async function sendChannelsMenu(to) {
-  await waSendList(
-    to,
-    "Canales",
-    "¿Dónde quieres el bot?",
-    "Elegir",
-    "Canales",
-    [{ id: "ch_whatsapp", title: "WhatsApp" }]
-  );
+  await waSendList(to, "Canal", "Este bot es para WhatsApp ✅", "Elegir", "Canal", [{ id: "ch_whatsapp", title: "WhatsApp" }]);
 }
 
 async function sendVolumeMenu(to) {
@@ -510,11 +501,12 @@ async function sendUrgencyMenu(to) {
   );
 }
 
+// (Se mantiene por compatibilidad, pero YA NO se envía automáticamente)
 async function sendCloseMenu(to) {
   await waSendButtons(to, "Siguiente paso", "¿Cómo quieres continuar?", [
     { id: "close_demo", title: "🗓️ Agendar demo" },
-    { id: "close_quote", title: "💬 Cotización por WhatsApp" },
-    { id: "close_human", title: "📞 Hablar con humano" },
+    { id: "close_quote", title: "💬 Cotización" },
+    { id: "close_human", title: "📞 Hablar humano" },
   ]);
 }
 
@@ -551,7 +543,6 @@ function mapIdToLabel(id) {
     obj_soporte: "Soporte / seguimiento",
     obj_otro: "Otro",
 
-    // ✅ WHATSAPP ONLY
     ch_whatsapp: "WhatsApp",
 
     vol_0_20: "0–20",
@@ -610,7 +601,7 @@ async function stepAskNext(to, session) {
     return;
   }
 
-  // ✅ WHATSAPP ONLY: fijar canal automáticamente (sin preguntar)
+  // ✅ SOLO WhatsApp: no preguntar canal, se setea automático
   if (!session.channels) {
     session.channels = "WhatsApp";
   }
@@ -651,19 +642,17 @@ async function stepAskNext(to, session) {
 
   if (!session.link) {
     session.state = "collect_link";
-    session.lastPrompt = `Opcional: pásame tu *web* (si tienes) para entender mejor tu caso. Si no, escribe *No tengo*.`;
+    // ✅ Se mantiene: pedir Instagram y web (si tiene)
+    session.lastPrompt = `Opcional: pásame tu *Instagram o web* (si tienes) para entender mejor tu caso. Si no, escribe *No tengo*.`;
     await waSendText(to, session.lastPrompt);
     return;
   }
 
   // done
   session.state = "done";
-  await waSendText(
-    to,
-    `✅ Perfecto, ya tengo lo necesario.\n\nEn breve te enviamos una recomendación y próximos pasos.\n\nSi deseas hablar con un asesor, escribe *Humano*.`
-  );
+  await waSendText(to, doneCustomerText());
 
-  // notify admin with summary
+  // notify admin with summary (cuando ya está completo)
   await notifyAdmin(session, to);
 }
 
@@ -737,27 +726,22 @@ app.post("/webhook", async (req, res) => {
 
     // Quick intents
     if (isHumanRequest(tNorm)) {
-      session.goal = "Hablar con humano";
+      session.goal = session.goal || "Hablar con humano";
 
-      const direct = ADMIN_PHONE ? prettyPhoneForUserDigitsOnly(ADMIN_PHONE) : "";
-      const directLine = direct ? `\n\n📞 Contacto directo: *${direct}*` : "";
+      // ✅ Enviar “handoff” SOLO cuando lo piden (humano/agente/asesor)
+      let extraContact = "";
+      if (ADMIN_PHONE) {
+        const d = digitsOnly(ADMIN_PHONE);
+        extraContact = `\n\n📲 Puedes escribirnos aquí: https://wa.me/${d}`;
+      }
 
-      await waSendText(
-        from,
-        `Claro ✅ Te paso con un asesor.${directLine}\n\nDime en una línea qué necesitas (tipo de bot y negocio).`
-      );
-
+      await waSendText(from, `Claro ✅ Te paso con un asesor.\nDime en una línea qué necesitas (tipo de bot y negocio).${extraContact}`);
       await notifyAdmin({ ...session, notes: (session.notes || "") + " | Pidió HUMANO (keyword)" }, from);
       return res.sendStatus(200);
     }
 
     // Anti-raro phrase handling
-    if (
-      tNorm.includes("como vendes") ||
-      tNorm.includes("y tu no tienes") ||
-      tNorm.includes("raro") ||
-      tNorm.includes("no tienes uno")
-    ) {
+    if (tNorm.includes("como vendes") || tNorm.includes("y tu no tienes") || tNorm.includes("raro") || tNorm.includes("no tienes uno")) {
       await waSendText(from, antiRaroText());
       // keep funnel
       if (!session.goal) session.goal = "Quiero un bot";
@@ -794,7 +778,7 @@ app.post("/webhook", async (req, res) => {
       return res.sendStatus(200);
     }
 
-    // Close choices (si llegan por botones viejos)
+    // Close choices (si alguna vez se usan)
     if (["close_demo", "close_quote", "close_human"].includes(userText)) {
       await handleCloseChoice(from, session, userText);
       return res.sendStatus(200);
@@ -861,13 +845,7 @@ app.post("/webhook", async (req, res) => {
       return res.sendStatus(200);
     }
 
-    // ✅ WHATSAPP ONLY: si por alguna razón llega a este estado, lo fija y sigue
-    if (session.state === "collect_channels") {
-      session.channels = "WhatsApp";
-      await waSendText(from, `✅`);
-      await stepAskNext(from, session);
-      return res.sendStatus(200);
-    }
+    // ✅ channels no se colecta por chat (WhatsApp fijo)
 
     if (session.state === "collect_volume") {
       if (label) session.volume = label;
@@ -918,12 +896,14 @@ app.post("/webhook", async (req, res) => {
       return res.sendStatus(200);
     }
 
-    // ✅ CAMBIO PRINCIPAL: cuando ya está DONE, NO volver a pedir demo/cotización/humano
     if (session.state === "done") {
+      // ✅ YA NO mandar “demo/cotización/humano” automático.
+      // Solo guardar nota y recordar que puede escribir HUMANO.
       if (tNorm.length > 2) {
         session.notes = safeText((session.notes ? session.notes + " | " : "") + userText, 400);
-        await waSendText(from, `¡Perfecto! ✅ Lo agregué a tu solicitud.\nEn breve un asesor te contacta.`);
-        await notifyAdmin({ ...session, notes: (session.notes || "") + " | Nota extra post-done" }, from);
+        await waSendText(from, `Perfecto ✅ Quedó anotado.\nSi deseas hablar con un asesor, escribe *Humano*.`);
+        // (Opcional) avisar admin si llega info extra
+        await notifyAdmin({ ...session, notes: (session.notes || "") + " | Mensaje post-done" }, from);
         return res.sendStatus(200);
       }
     }
@@ -947,11 +927,13 @@ app.post("/webhook", async (req, res) => {
     }
 
     // After AI, continue funnel if incomplete
+    // ✅ channels es WhatsApp fijo, no bloquear por eso
+    if (!session.channels) session.channels = "WhatsApp";
+
     const needsMore =
       !session.botType ||
       !session.sector ||
       !session.objective ||
-      !session.channels ||
       !session.volume ||
       !session.urgency ||
       !session.name ||
@@ -963,10 +945,7 @@ app.post("/webhook", async (req, res) => {
       await stepAskNext(from, session);
     } else if (session.state !== "done") {
       session.state = "done";
-      await waSendText(
-        from,
-        `✅ Perfecto, ya tengo lo necesario.\n\nEn breve te enviamos una recomendación y próximos pasos.\n\nSi deseas hablar con un asesor, escribe *Humano*.`
-      );
+      await waSendText(from, doneCustomerText());
       await notifyAdmin(session, from);
     }
 
