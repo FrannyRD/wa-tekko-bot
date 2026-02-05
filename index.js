@@ -29,7 +29,9 @@ const BOTHUB_WEBHOOK_URL = process.env.BOTHUB_WEBHOOK_URL || ""; // URL completa
 const BOTHUB_WEBHOOK_SECRET = process.env.BOTHUB_WEBHOOK_SECRET || "";
 const BOTHUB_TIMEOUT_MS = Number(process.env.BOTHUB_TIMEOUT_MS || 6000);
 
+// =====================================================
 // Stable stringify para que firma HMAC sea igual al Hub
+// =====================================================
 function stableStringify(obj) {
   if (obj === null || typeof obj !== "object") return JSON.stringify(obj);
   if (Array.isArray(obj)) return `[${obj.map(stableStringify).join(",")}]`;
@@ -37,9 +39,14 @@ function stableStringify(obj) {
   return `{${keys.map((k) => JSON.stringify(k) + ":" + stableStringify(obj[k])).join(",")}}`;
 }
 
-function bothubHmac(payload, secret) {
+function bothubHmacStable(payload, secret) {
   const raw = stableStringify(payload);
   return crypto.createHmac("sha256", secret).update(raw).digest("hex");
+}
+
+function bothubHmacJson(payload, secret) {
+  // por si BOTHUB (server) firma con JSON.stringify normal
+  return crypto.createHmac("sha256", secret).update(JSON.stringify(payload)).digest("hex");
 }
 
 // ✅ NEW: acepta varias formas de header de firma (por compatibilidad)
@@ -61,7 +68,6 @@ function getHubSignature(req) {
 
   const sig = String(h || "").trim();
   if (!sig) return "";
-  // si viene "sha256=...." lo dejamos solo en hex
   return sig.startsWith("sha256=") ? sig.slice("sha256=".length) : sig;
 }
 
@@ -72,12 +78,25 @@ function timingSafeEqualHex(aHex, bHex) {
   return crypto.timingSafeEqual(a, b);
 }
 
+// ✅ Validador robusto: acepta firma con stableStringify o JSON.stringify
+function verifyHubSignature(reqBody, signatureHex, secret) {
+  if (!signatureHex || !secret) return false;
+
+  const expectedStable = bothubHmacStable(reqBody, secret);
+  if (timingSafeEqualHex(signatureHex, expectedStable)) return true;
+
+  const expectedJson = bothubHmacJson(reqBody, secret);
+  if (timingSafeEqualHex(signatureHex, expectedJson)) return true;
+
+  return false;
+}
+
 async function bothubReportMessage(payload) {
   // NO rompe tu bot si no está configurado
   if (!BOTHUB_WEBHOOK_URL || !BOTHUB_WEBHOOK_SECRET) return;
 
   try {
-    const sig = bothubHmac(payload, BOTHUB_WEBHOOK_SECRET);
+    const sig = bothubHmacStable(payload, BOTHUB_WEBHOOK_SECRET);
     await axios.post(BOTHUB_WEBHOOK_URL, payload, {
       headers: {
         "Content-Type": "application/json",
@@ -891,11 +910,17 @@ app.post("/agent_message", async (req, res) => {
       return res.status(400).json({ error: "BOTHUB_WEBHOOK_SECRET not configured" });
     }
 
-    // ✅ FIX: leer firma de forma compatible + aceptar "sha256="
     const signature = getHubSignature(req);
-    const expected = bothubHmac(req.body, BOTHUB_WEBHOOK_SECRET);
 
-    if (!signature || !timingSafeEqualHex(signature, expected)) {
+    // ✅ FIX REAL: aceptar firma stableStringify O JSON.stringify
+    const okSig = verifyHubSignature(req.body, signature, BOTHUB_WEBHOOK_SECRET);
+
+    if (!signature || !okSig) {
+      // log corto para debug (no imprime secretos)
+      console.warn("[agent_message] Invalid signature", {
+        hasSignature: Boolean(signature),
+        sigLen: signature ? String(signature).length : 0,
+      });
       return res.status(401).json({ error: "Invalid signature" });
     }
 
@@ -904,6 +929,9 @@ app.post("/agent_message", async (req, res) => {
     if (!text || !String(text).trim()) return res.status(400).json({ error: "text is required" });
 
     // Enviar por WhatsApp como AGENTE (humano)
+    // ⚠️ Nota: waSendText reporta al Hub como source BOT (por tu implementación).
+    // Para no duplicar y para mantener tu lógica, lo dejamos igual.
+    // Igual reportamos luego el OUTBOUND como AGENT para BotHub.
     await waSendText(String(waTo), String(text));
 
     // Reportar al Hub como OUTBOUND (source AGENT)
