@@ -42,6 +42,36 @@ function bothubHmac(payload, secret) {
   return crypto.createHmac("sha256", secret).update(raw).digest("hex");
 }
 
+// ✅ NEW: acepta varias formas de header de firma (por compatibilidad)
+// - X-HUB-SIGNATURE
+// - x-hub-signature
+// - X-Hub-Signature / x-hub-signature
+// - X-HUB-SIGNATURE-256 / X-Hub-Signature-256 (por si alguien lo manda así)
+// y permite formato "sha256=<hex>" o "<hex>"
+function getHubSignature(req) {
+  const h =
+    req.get("X-HUB-SIGNATURE") ||
+    req.get("x-hub-signature") ||
+    req.get("X-Hub-Signature") ||
+    req.get("x-hub-signature") ||
+    req.get("X-HUB-SIGNATURE-256") ||
+    req.get("X-Hub-Signature-256") ||
+    req.get("x-hub-signature-256") ||
+    "";
+
+  const sig = String(h || "").trim();
+  if (!sig) return "";
+  // si viene "sha256=...." lo dejamos solo en hex
+  return sig.startsWith("sha256=") ? sig.slice("sha256=".length) : sig;
+}
+
+function timingSafeEqualHex(aHex, bHex) {
+  const a = Buffer.from(String(aHex || ""), "utf8");
+  const b = Buffer.from(String(bHex || ""), "utf8");
+  if (!a.length || a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
+}
+
 async function bothubReportMessage(payload) {
   // NO rompe tu bot si no está configurado
   if (!BOTHUB_WEBHOOK_URL || !BOTHUB_WEBHOOK_SECRET) return;
@@ -87,14 +117,33 @@ function extractInboundMeta(msg) {
   }
 
   // Image / video / document / sticker
-  if (msg?.type === "image") return { kind: "IMAGE", mediaId: msg?.image?.id, mimeType: msg?.image?.mime_type, caption: msg?.image?.caption };
-  if (msg?.type === "video") return { kind: "VIDEO", mediaId: msg?.video?.id, mimeType: msg?.video?.mime_type, caption: msg?.video?.caption };
-  if (msg?.type === "document") return { kind: "DOCUMENT", mediaId: msg?.document?.id, mimeType: msg?.document?.mime_type, filename: msg?.document?.filename };
+  if (msg?.type === "image")
+    return {
+      kind: "IMAGE",
+      mediaId: msg?.image?.id,
+      mimeType: msg?.image?.mime_type,
+      caption: msg?.image?.caption,
+    };
+  if (msg?.type === "video")
+    return {
+      kind: "VIDEO",
+      mediaId: msg?.video?.id,
+      mimeType: msg?.video?.mime_type,
+      caption: msg?.video?.caption,
+    };
+  if (msg?.type === "document")
+    return {
+      kind: "DOCUMENT",
+      mediaId: msg?.document?.id,
+      mimeType: msg?.document?.mime_type,
+      filename: msg?.document?.filename,
+    };
   if (msg?.type === "sticker") return { kind: "STICKER", mediaId: msg?.sticker?.id, mimeType: msg?.sticker?.mime_type };
 
   // Contacts / reaction
   if (msg?.type === "contacts") return { kind: "CONTACTS", count: msg?.contacts?.length || 0 };
-  if (msg?.type === "reaction") return { kind: "REACTION", emoji: msg?.reaction?.emoji, messageId: msg?.reaction?.message_id };
+  if (msg?.type === "reaction")
+    return { kind: "REACTION", emoji: msg?.reaction?.emoji, messageId: msg?.reaction?.message_id };
 
   return { kind: msg?.type ? String(msg.type).toUpperCase() : "UNKNOWN" };
 }
@@ -842,12 +891,11 @@ app.post("/agent_message", async (req, res) => {
       return res.status(400).json({ error: "BOTHUB_WEBHOOK_SECRET not configured" });
     }
 
-    const signature = req.get("X-HUB-SIGNATURE") || "";
+    // ✅ FIX: leer firma de forma compatible + aceptar "sha256="
+    const signature = getHubSignature(req);
     const expected = bothubHmac(req.body, BOTHUB_WEBHOOK_SECRET);
 
-    const a = Buffer.from(signature, "utf8");
-    const b = Buffer.from(expected, "utf8");
-    if (!signature || a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+    if (!signature || !timingSafeEqualHex(signature, expected)) {
       return res.status(401).json({ error: "Invalid signature" });
     }
 
