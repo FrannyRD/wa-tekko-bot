@@ -23,6 +23,44 @@ const ADMIN_PHONE = process.env.ADMIN_PHONE || ""; // e.g. 1809XXXXXXX (digits o
 const DEFAULT_COUNTRY_HINT = process.env.DEFAULT_COUNTRY_HINT || "República Dominicana";
 
 // =====================================================
+// ✅ BOTHUB (NEW) - mínimos para conectar al Hub
+// =====================================================
+const BOTHUB_WEBHOOK_URL = process.env.BOTHUB_WEBHOOK_URL || ""; // URL completa: .../api/webhooks/webhook/:botId
+const BOTHUB_WEBHOOK_SECRET = process.env.BOTHUB_WEBHOOK_SECRET || "";
+const BOTHUB_TIMEOUT_MS = Number(process.env.BOTHUB_TIMEOUT_MS || 6000);
+
+// Stable stringify para que firma HMAC sea igual al Hub
+function stableStringify(obj) {
+  if (obj === null || typeof obj !== "object") return JSON.stringify(obj);
+  if (Array.isArray(obj)) return `[${obj.map(stableStringify).join(",")}]`;
+  const keys = Object.keys(obj).sort();
+  return `{${keys.map((k) => JSON.stringify(k) + ":" + stableStringify(obj[k])).join(",")}}`;
+}
+
+function bothubHmac(payload, secret) {
+  const raw = stableStringify(payload);
+  return crypto.createHmac("sha256", secret).update(raw).digest("hex");
+}
+
+async function bothubReportMessage(payload) {
+  // NO rompe tu bot si no está configurado
+  if (!BOTHUB_WEBHOOK_URL || !BOTHUB_WEBHOOK_SECRET) return;
+
+  try {
+    const sig = bothubHmac(payload, BOTHUB_WEBHOOK_SECRET);
+    await axios.post(BOTHUB_WEBHOOK_URL, payload, {
+      headers: {
+        "Content-Type": "application/json",
+        "X-HUB-SIGNATURE": sig,
+      },
+      timeout: BOTHUB_TIMEOUT_MS,
+    });
+  } catch (e) {
+    // silencioso para no tumbar el bot
+    console.error("Bothub report failed:", e?.response?.data || e?.message || e);
+  }
+}
+// =====================================================
 // Express (raw body needed for signature verification)
 // =====================================================
 const app = express();
@@ -93,6 +131,10 @@ function assertEnv() {
   if (missing.length) {
     console.warn("⚠️ Missing ENV:", missing.join(", "));
   }
+
+  // ✅ avisos útiles para Bothub (sin romper)
+  if (!BOTHUB_WEBHOOK_URL) console.warn("⚠️ Missing ENV: BOTHUB_WEBHOOK_URL (Hub won't receive messages)");
+  if (!BOTHUB_WEBHOOK_SECRET) console.warn("⚠️ Missing ENV: BOTHUB_WEBHOOK_SECRET (Hub signature will fail)");
 }
 assertEnv();
 
@@ -684,6 +726,54 @@ async function handleCloseChoice(to, session, choiceId) {
 }
 
 // =====================================================
+// ✅ NEW: endpoint para recibir mensaje del AGENTE desde BotHub
+// POST /agent_message
+// body: { conversationId, waTo, text, agentUserId }
+// header: X-HUB-SIGNATURE (HMAC)
+// =====================================================
+app.post("/agent_message", async (req, res) => {
+  try {
+    // Validación básica ENV
+    if (!BOTHUB_WEBHOOK_SECRET) {
+      return res.status(400).json({ error: "BOTHUB_WEBHOOK_SECRET not configured" });
+    }
+
+    const signature = req.get("X-HUB-SIGNATURE") || "";
+    const expected = bothubHmac(req.body, BOTHUB_WEBHOOK_SECRET);
+
+    // Timing-safe compare
+    const a = Buffer.from(signature, "utf8");
+    const b = Buffer.from(expected, "utf8");
+    if (!signature || a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+      return res.status(401).json({ error: "Invalid signature" });
+    }
+
+    const { waTo, text } = req.body || {};
+    if (!waTo || !String(waTo).trim()) return res.status(400).json({ error: "waTo is required" });
+    if (!text || !String(text).trim()) return res.status(400).json({ error: "text is required" });
+
+    // Enviar por WhatsApp como AGENTE (humano)
+    await waSendText(String(waTo), String(text));
+
+    // Reportar al Hub como OUTBOUND (source AGENT)
+    await bothubReportMessage({
+      direction: "OUTBOUND",
+      to: String(waTo),
+      body: String(text),
+      source: "AGENT",
+      // opcional: si quieres trazar
+      conversationId: req.body?.conversationId,
+      agentUserId: req.body?.agentUserId,
+    });
+
+    return res.json({ ok: true });
+  } catch (e) {
+    console.error("agent_message error:", e?.response?.data || e?.message || e);
+    return res.status(500).json({ error: "Internal error" });
+  }
+});
+
+// =====================================================
 // Webhook verify
 // =====================================================
 app.get("/webhook", (req, res) => {
@@ -723,6 +813,17 @@ app.post("/webhook", async (req, res) => {
     const tNorm = normalizeText(userText);
 
     if (!userText) return res.sendStatus(200);
+
+    // ✅ NEW: Reportar INBOUND al Hub (mensaje real)
+    await bothubReportMessage({
+      direction: "INBOUND",
+      from: String(from),
+      body: String(userText),
+      source: "WHATSAPP",
+      // opcional
+      waMessageId: msg?.id,
+      name: value?.contacts?.[0]?.profile?.name,
+    });
 
     // Quick intents
     if (isHumanRequest(tNorm)) {
@@ -924,6 +1025,14 @@ app.post("/webhook", async (req, res) => {
 
     if (aiReply) {
       await waSendText(from, aiReply);
+
+      // ✅ NEW: Reportar OUTBOUND (respuesta del bot) al Hub
+      await bothubReportMessage({
+        direction: "OUTBOUND",
+        to: String(from),
+        body: String(aiReply),
+        source: "BOT",
+      });
     }
 
     // After AI, continue funnel if incomplete
@@ -946,6 +1055,15 @@ app.post("/webhook", async (req, res) => {
     } else if (session.state !== "done") {
       session.state = "done";
       await waSendText(from, doneCustomerText());
+
+      // ✅ NEW: Reportar OUTBOUND (texto final) al Hub
+      await bothubReportMessage({
+        direction: "OUTBOUND",
+        to: String(from),
+        body: String(doneCustomerText()),
+        source: "BOT",
+      });
+
       await notifyAdmin(session, from);
     }
 
