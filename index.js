@@ -60,6 +60,45 @@ async function bothubReportMessage(payload) {
     console.error("Bothub report failed:", e?.response?.data || e?.message || e);
   }
 }
+
+// ✅ NEW: meta para audio/ubicación/attachments (para que en Hub se vea TODO)
+function extractInboundMeta(msg) {
+  if (!msg) return {};
+
+  // Audio
+  if (msg?.type === "audio") {
+    return {
+      kind: "AUDIO",
+      mediaId: msg?.audio?.id,
+      mimeType: msg?.audio?.mime_type,
+      voice: msg?.audio?.voice,
+    };
+  }
+
+  // Location
+  if (msg?.type === "location") {
+    return {
+      kind: "LOCATION",
+      latitude: msg?.location?.latitude,
+      longitude: msg?.location?.longitude,
+      name: msg?.location?.name,
+      address: msg?.location?.address,
+    };
+  }
+
+  // Image / video / document / sticker
+  if (msg?.type === "image") return { kind: "IMAGE", mediaId: msg?.image?.id, mimeType: msg?.image?.mime_type, caption: msg?.image?.caption };
+  if (msg?.type === "video") return { kind: "VIDEO", mediaId: msg?.video?.id, mimeType: msg?.video?.mime_type, caption: msg?.video?.caption };
+  if (msg?.type === "document") return { kind: "DOCUMENT", mediaId: msg?.document?.id, mimeType: msg?.document?.mime_type, filename: msg?.document?.filename };
+  if (msg?.type === "sticker") return { kind: "STICKER", mediaId: msg?.sticker?.id, mimeType: msg?.sticker?.mime_type };
+
+  // Contacts / reaction
+  if (msg?.type === "contacts") return { kind: "CONTACTS", count: msg?.contacts?.length || 0 };
+  if (msg?.type === "reaction") return { kind: "REACTION", emoji: msg?.reaction?.emoji, messageId: msg?.reaction?.message_id };
+
+  return { kind: msg?.type ? String(msg.type).toUpperCase() : "UNKNOWN" };
+}
+
 // =====================================================
 // Express (raw body needed for signature verification)
 // =====================================================
@@ -218,6 +257,7 @@ function digitsOnly(s) {
 
 // =====================================================
 // WhatsApp Senders
+// ✅ NO TOCA TU LÓGICA: solo reporta OUTBOUND al Hub
 // =====================================================
 async function waSendText(to, body) {
   const url = `https://graph.facebook.com/v20.0/${PHONE_NUMBER_ID}/messages`;
@@ -231,6 +271,15 @@ async function waSendText(to, body) {
     },
     { headers: { Authorization: `Bearer ${WA_TOKEN}` } }
   );
+
+  // ✅ Reportar al Hub (OUTBOUND)
+  await bothubReportMessage({
+    direction: "OUTBOUND",
+    to: String(to),
+    body: String(body),
+    source: "BOT",
+    kind: "TEXT",
+  });
 }
 
 async function waSendButtons(to, headerText, bodyText, buttons) {
@@ -256,6 +305,20 @@ async function waSendButtons(to, headerText, bodyText, buttons) {
     },
     { headers: { Authorization: `Bearer ${WA_TOKEN}` } }
   );
+
+  // ✅ Reportar al Hub (OUTBOUND) - representación de UI como texto
+  const rendered =
+    `${headerText ? `*${headerText}*\n` : ""}${bodyText}\n\n` +
+    buttons.slice(0, 3).map((b) => `• [${b.id}] ${b.title}`).join("\n");
+
+  await bothubReportMessage({
+    direction: "OUTBOUND",
+    to: String(to),
+    body: rendered,
+    source: "BOT",
+    kind: "BUTTONS",
+    meta: { headerText, bodyText, buttons: buttons.slice(0, 3) },
+  });
 }
 
 async function waSendList(to, headerText, bodyText, buttonText, sectionTitle, rows) {
@@ -267,6 +330,12 @@ async function waSendList(to, headerText, bodyText, buttonText, sectionTitle, ro
     const t = (s || "").toString().trim();
     return t.length > 24 ? t.slice(0, 24) : t;
   };
+
+  const finalRows = rows.map((r) => ({
+    id: r.id,
+    title: clampTitle(r.title),
+    description: r.description || "",
+  }));
 
   await axios.post(
     url,
@@ -283,11 +352,7 @@ async function waSendList(to, headerText, bodyText, buttonText, sectionTitle, ro
           sections: [
             {
               title: sectionTitle || "Opciones",
-              rows: rows.map((r) => ({
-                id: r.id,
-                title: clampTitle(r.title), // ✅ aquí el cambio
-                description: r.description || "",
-              })),
+              rows: finalRows,
             },
           ],
         },
@@ -295,6 +360,21 @@ async function waSendList(to, headerText, bodyText, buttonText, sectionTitle, ro
     },
     { headers: { Authorization: `Bearer ${WA_TOKEN}` } }
   );
+
+  // ✅ Reportar al Hub (OUTBOUND)
+  const rendered =
+    `${headerText ? `*${headerText}*\n` : ""}${bodyText}\n\n` +
+    `(${buttonText || "Ver opciones"} · ${sectionTitle || "Opciones"})\n` +
+    finalRows.map((r) => `• [${r.id}] ${r.title}${r.description ? ` — ${r.description}` : ""}`).join("\n");
+
+  await bothubReportMessage({
+    direction: "OUTBOUND",
+    to: String(to),
+    body: rendered,
+    source: "BOT",
+    kind: "LIST",
+    meta: { headerText, bodyText, buttonText, sectionTitle, rows: finalRows },
+  });
 }
 
 // =====================================================
@@ -410,24 +490,49 @@ ${JSON.stringify(
 }
 
 // =====================================================
-// Incoming parsing (text + interactive)
+// Incoming parsing (text + interactive + audio/location/etc)
 // =====================================================
 function extractIncomingText(msg) {
   if (!msg) return "";
 
+  // Texto normal
   if (msg?.text?.body) return msg.text.body;
 
+  // Botones/listas
   if (msg?.type === "interactive" && msg?.interactive?.button_reply) {
     const br = msg.interactive.button_reply;
     return br.id || br.title || "";
   }
-
   if (msg?.type === "interactive" && msg?.interactive?.list_reply) {
     const lr = msg.interactive.list_reply;
     return lr.id || lr.title || "";
   }
 
-  return "";
+  // Nota de voz / audio
+  if (msg?.type === "audio" && msg?.audio?.id) {
+    return "[AUDIO]";
+  }
+
+  // Ubicación
+  if (msg?.type === "location" && msg?.location) {
+    const { latitude, longitude, name, address } = msg.location;
+    return `📍 Ubicación: ${name || ""} ${address || ""} (${latitude}, ${longitude})`.trim();
+  }
+
+  // Imagen / video / documento / sticker
+  if (msg?.type === "image" && msg?.image?.id) return "[IMAGE]";
+  if (msg?.type === "video" && msg?.video?.id) return "[VIDEO]";
+  if (msg?.type === "document" && msg?.document?.id) return "[DOCUMENT]";
+  if (msg?.type === "sticker" && msg?.sticker?.id) return "[STICKER]";
+
+  // Contacto compartido
+  if (msg?.type === "contacts" && msg?.contacts?.length) return "[CONTACTS]";
+
+  // Reacción
+  if (msg?.type === "reaction" && msg?.reaction) return `[REACTION] ${msg.reaction.emoji || ""}`.trim();
+
+  // Fallback
+  return `[${(msg?.type || "UNKNOWN").toUpperCase()}]`;
 }
 
 function extractReferral(msg) {
@@ -733,7 +838,6 @@ async function handleCloseChoice(to, session, choiceId) {
 // =====================================================
 app.post("/agent_message", async (req, res) => {
   try {
-    // Validación básica ENV
     if (!BOTHUB_WEBHOOK_SECRET) {
       return res.status(400).json({ error: "BOTHUB_WEBHOOK_SECRET not configured" });
     }
@@ -741,7 +845,6 @@ app.post("/agent_message", async (req, res) => {
     const signature = req.get("X-HUB-SIGNATURE") || "";
     const expected = bothubHmac(req.body, BOTHUB_WEBHOOK_SECRET);
 
-    // Timing-safe compare
     const a = Buffer.from(signature, "utf8");
     const b = Buffer.from(expected, "utf8");
     if (!signature || a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
@@ -761,9 +864,9 @@ app.post("/agent_message", async (req, res) => {
       to: String(waTo),
       body: String(text),
       source: "AGENT",
-      // opcional: si quieres trazar
       conversationId: req.body?.conversationId,
       agentUserId: req.body?.agentUserId,
+      kind: "TEXT",
     });
 
     return res.json({ ok: true });
@@ -814,22 +917,23 @@ app.post("/webhook", async (req, res) => {
 
     if (!userText) return res.sendStatus(200);
 
-    // ✅ NEW: Reportar INBOUND al Hub (mensaje real)
+    // ✅ NEW: Reportar INBOUND al Hub (texto + meta para audio/ubicación/attachments)
+    const inboundMeta = extractInboundMeta(msg);
     await bothubReportMessage({
       direction: "INBOUND",
       from: String(from),
       body: String(userText),
       source: "WHATSAPP",
-      // opcional
       waMessageId: msg?.id,
       name: value?.contacts?.[0]?.profile?.name,
+      kind: inboundMeta?.kind || (msg?.type ? String(msg.type).toUpperCase() : "UNKNOWN"),
+      meta: inboundMeta,
     });
 
     // Quick intents
     if (isHumanRequest(tNorm)) {
       session.goal = session.goal || "Hablar con humano";
 
-      // ✅ Enviar “handoff” SOLO cuando lo piden (humano/agente/asesor)
       let extraContact = "";
       if (ADMIN_PHONE) {
         const d = digitsOnly(ADMIN_PHONE);
@@ -844,7 +948,6 @@ app.post("/webhook", async (req, res) => {
     // Anti-raro phrase handling
     if (tNorm.includes("como vendes") || tNorm.includes("y tu no tienes") || tNorm.includes("raro") || tNorm.includes("no tienes uno")) {
       await waSendText(from, antiRaroText());
-      // keep funnel
       if (!session.goal) session.goal = "Quiero un bot";
       await sendBotTypes(from);
       return res.sendStatus(200);
@@ -879,7 +982,7 @@ app.post("/webhook", async (req, res) => {
       return res.sendStatus(200);
     }
 
-    // Close choices (si alguna vez se usan)
+    // Close choices
     if (["close_demo", "close_quote", "close_human"].includes(userText)) {
       await handleCloseChoice(from, session, userText);
       return res.sendStatus(200);
@@ -895,7 +998,6 @@ app.post("/webhook", async (req, res) => {
     if (isPricingIntent(tNorm) && session.state !== "done") {
       session.goal = session.goal || "Info / precios";
       await waSendText(from, pricingInfoText());
-      // Keep funnel
       if (!session.botType) {
         await sendBotTypes(from);
         session.state = "collect_bot_type";
@@ -921,7 +1023,6 @@ app.post("/webhook", async (req, res) => {
         await stepAskNext(from, session);
         return res.sendStatus(200);
       }
-      // Accept free text bot type
       if (tNorm.length >= 2) {
         session.botType = safeText(userText, 80);
         await waSendText(from, `Perfecto ✅`);
@@ -946,7 +1047,7 @@ app.post("/webhook", async (req, res) => {
       return res.sendStatus(200);
     }
 
-    // ✅ channels no se colecta por chat (WhatsApp fijo)
+    if (!session.channels) session.channels = "WhatsApp";
 
     if (session.state === "collect_volume") {
       if (label) session.volume = label;
@@ -998,12 +1099,9 @@ app.post("/webhook", async (req, res) => {
     }
 
     if (session.state === "done") {
-      // ✅ YA NO mandar “demo/cotización/humano” automático.
-      // Solo guardar nota y recordar que puede escribir HUMANO.
       if (tNorm.length > 2) {
         session.notes = safeText((session.notes ? session.notes + " | " : "") + userText, 400);
         await waSendText(from, `Perfecto ✅ Quedó anotado.\nSi deseas hablar con un asesor, escribe *Humano*.`);
-        // (Opcional) avisar admin si llega info extra
         await notifyAdmin({ ...session, notes: (session.notes || "") + " | Mensaje post-done" }, from);
         return res.sendStatus(200);
       }
@@ -1025,18 +1123,9 @@ app.post("/webhook", async (req, res) => {
 
     if (aiReply) {
       await waSendText(from, aiReply);
-
-      // ✅ NEW: Reportar OUTBOUND (respuesta del bot) al Hub
-      await bothubReportMessage({
-        direction: "OUTBOUND",
-        to: String(from),
-        body: String(aiReply),
-        source: "BOT",
-      });
+      // ✅ Nota: OUTBOUND al Hub ya se reporta dentro de waSendText()
     }
 
-    // After AI, continue funnel if incomplete
-    // ✅ channels es WhatsApp fijo, no bloquear por eso
     if (!session.channels) session.channels = "WhatsApp";
 
     const needsMore =
@@ -1055,15 +1144,7 @@ app.post("/webhook", async (req, res) => {
     } else if (session.state !== "done") {
       session.state = "done";
       await waSendText(from, doneCustomerText());
-
-      // ✅ NEW: Reportar OUTBOUND (texto final) al Hub
-      await bothubReportMessage({
-        direction: "OUTBOUND",
-        to: String(from),
-        body: String(doneCustomerText()),
-        source: "BOT",
-      });
-
+      // ✅ Nota: OUTBOUND al Hub ya se reporta dentro de waSendText()
       await notifyAdmin(session, from);
     }
 
