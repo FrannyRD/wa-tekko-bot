@@ -23,6 +23,13 @@ const ADMIN_PHONE = process.env.ADMIN_PHONE || ""; // e.g. 1809XXXXXXX (digits o
 const DEFAULT_COUNTRY_HINT = process.env.DEFAULT_COUNTRY_HINT || "República Dominicana";
 
 // =====================================================
+// ✅ SHORT FLOW (NEW)
+// Solo 3 preguntas clave para que la gente no se aburra:
+// 1) Tipo de bot, 2) Sector, 3) Objetivo
+// =====================================================
+const SHORT_FLOW = true;
+
+// =====================================================
 // ✅ BOTHUB (NEW) - mínimos para conectar al Hub
 // =====================================================
 const BOTHUB_WEBHOOK_URL = process.env.BOTHUB_WEBHOOK_URL || ""; // URL completa: .../api/webhooks/webhook/:botId
@@ -32,19 +39,19 @@ const BOTHUB_TIMEOUT_MS = Number(process.env.BOTHUB_TIMEOUT_MS || 6000);
 // =====================================================
 // Stable stringify para que firma HMAC sea igual al Hub
 // =====================================================
-function stableStringify(obj: any) {
+function stableStringify(obj) {
   if (obj === null || typeof obj !== "object") return JSON.stringify(obj);
   if (Array.isArray(obj)) return `[${obj.map(stableStringify).join(",")}]`;
   const keys = Object.keys(obj).sort();
   return `{${keys.map((k) => JSON.stringify(k) + ":" + stableStringify(obj[k])).join(",")}}`;
 }
 
-function bothubHmacStable(payload: any, secret: string) {
+function bothubHmacStable(payload, secret) {
   const raw = stableStringify(payload);
   return crypto.createHmac("sha256", secret).update(raw).digest("hex");
 }
 
-function bothubHmacJson(payload: any, secret: string) {
+function bothubHmacJson(payload, secret) {
   // por si BOTHUB (server) firma con JSON.stringify normal
   return crypto.createHmac("sha256", secret).update(JSON.stringify(payload)).digest("hex");
 }
@@ -55,7 +62,7 @@ function bothubHmacJson(payload: any, secret: string) {
 // - X-Hub-Signature / x-hub-signature
 // - X-HUB-SIGNATURE-256 / X-Hub-Signature-256 (por si alguien lo manda así)
 // y permite formato "sha256=<hex>" o "<hex>"
-function getHubSignature(req: any) {
+function getHubSignature(req) {
   const h =
     req.get("X-HUB-SIGNATURE") ||
     req.get("x-hub-signature") ||
@@ -71,7 +78,7 @@ function getHubSignature(req: any) {
   return sig.startsWith("sha256=") ? sig.slice("sha256=".length) : sig;
 }
 
-function timingSafeEqualHex(aHex: any, bHex: any) {
+function timingSafeEqualHex(aHex, bHex) {
   const a = Buffer.from(String(aHex || ""), "utf8");
   const b = Buffer.from(String(bHex || ""), "utf8");
   if (!a.length || a.length !== b.length) return false;
@@ -79,7 +86,7 @@ function timingSafeEqualHex(aHex: any, bHex: any) {
 }
 
 // ✅ Validador robusto: acepta firma con stableStringify o JSON.stringify
-function verifyHubSignature(reqBody: any, signatureHex: string, secret: string) {
+function verifyHubSignature(reqBody, signatureHex, secret) {
   if (!signatureHex || !secret) return false;
 
   const expectedStable = bothubHmacStable(reqBody, secret);
@@ -91,7 +98,7 @@ function verifyHubSignature(reqBody: any, signatureHex: string, secret: string) 
   return false;
 }
 
-async function bothubReportMessage(payload: any) {
+async function bothubReportMessage(payload) {
   // NO rompe tu bot si no está configurado
   if (!BOTHUB_WEBHOOK_URL || !BOTHUB_WEBHOOK_SECRET) return;
 
@@ -104,67 +111,72 @@ async function bothubReportMessage(payload: any) {
       },
       timeout: BOTHUB_TIMEOUT_MS,
     });
-  } catch (e: any) {
+  } catch (e) {
     // silencioso para no tumbar el bot
-    console.error("Bothub report failed:", e?.response?.data || e?.message || e);
+    console.error("Bothub report failed:", (e && e.response && e.response.data) || (e && e.message) || e);
   }
 }
 
 // ✅ NEW: meta para audio/ubicación/attachments (para que en Hub se vea TODO)
-function extractInboundMeta(msg: any) {
+function extractInboundMeta(msg) {
   if (!msg) return {};
 
   // Audio
-  if (msg?.type === "audio") {
+  if (msg && msg.type === "audio") {
     return {
       kind: "AUDIO",
-      mediaId: msg?.audio?.id,
-      mimeType: msg?.audio?.mime_type,
-      voice: msg?.audio?.voice,
+      mediaId: msg && msg.audio && msg.audio.id,
+      mimeType: msg && msg.audio && msg.audio.mime_type,
+      voice: msg && msg.audio && msg.audio.voice,
     };
   }
 
   // Location
-  if (msg?.type === "location") {
+  if (msg && msg.type === "location") {
     return {
       kind: "LOCATION",
-      latitude: msg?.location?.latitude,
-      longitude: msg?.location?.longitude,
-      name: msg?.location?.name,
-      address: msg?.location?.address,
+      latitude: msg && msg.location && msg.location.latitude,
+      longitude: msg && msg.location && msg.location.longitude,
+      name: msg && msg.location && msg.location.name,
+      address: msg && msg.location && msg.location.address,
     };
   }
 
   // Image / video / document / sticker
-  if (msg?.type === "image")
+  if (msg && msg.type === "image")
     return {
       kind: "IMAGE",
-      mediaId: msg?.image?.id,
-      mimeType: msg?.image?.mime_type,
-      caption: msg?.image?.caption,
+      mediaId: msg && msg.image && msg.image.id,
+      mimeType: msg && msg.image && msg.image.mime_type,
+      caption: msg && msg.image && msg.image.caption,
     };
-  if (msg?.type === "video")
+  if (msg && msg.type === "video")
     return {
       kind: "VIDEO",
-      mediaId: msg?.video?.id,
-      mimeType: msg?.video?.mime_type,
-      caption: msg?.video?.caption,
+      mediaId: msg && msg.video && msg.video.id,
+      mimeType: msg && msg.video && msg.video.mime_type,
+      caption: msg && msg.video && msg.video.caption,
     };
-  if (msg?.type === "document")
+  if (msg && msg.type === "document")
     return {
       kind: "DOCUMENT",
-      mediaId: msg?.document?.id,
-      mimeType: msg?.document?.mime_type,
-      filename: msg?.document?.filename,
+      mediaId: msg && msg.document && msg.document.id,
+      mimeType: msg && msg.document && msg.document.mime_type,
+      filename: msg && msg.document && msg.document.filename,
     };
-  if (msg?.type === "sticker") return { kind: "STICKER", mediaId: msg?.sticker?.id, mimeType: msg?.sticker?.mime_type };
+  if (msg && msg.type === "sticker")
+    return {
+      kind: "STICKER",
+      mediaId: msg && msg.sticker && msg.sticker.id,
+      mimeType: msg && msg.sticker && msg.sticker.mime_type,
+    };
 
   // Contacts / reaction
-  if (msg?.type === "contacts") return { kind: "CONTACTS", count: msg?.contacts?.length || 0 };
-  if (msg?.type === "reaction")
-    return { kind: "REACTION", emoji: msg?.reaction?.emoji, messageId: msg?.reaction?.message_id };
+  if (msg && msg.type === "contacts") return { kind: "CONTACTS", count: (msg && msg.contacts && msg.contacts.length) || 0 };
+  if (msg && msg.type === "reaction")
+    return { kind: "REACTION", emoji: msg && msg.reaction && msg.reaction.emoji, messageId: msg && msg.reaction && msg.reaction.message_id };
 
-  return { kind: msg?.type ? String(msg.type).toUpperCase() : "UNKNOWN" };
+  return { kind: msg && msg.type ? String(msg.type).toUpperCase() : "UNKNOWN" };
 }
 
 // =====================================================
@@ -173,7 +185,7 @@ function extractInboundMeta(msg: any) {
 const app = express();
 app.use(
   express.json({
-    verify: (req: any, _res, buf) => {
+    verify: (req, _res, buf) => {
       req.rawBody = buf;
     },
   })
@@ -182,9 +194,9 @@ app.use(
 // =====================================================
 // In-memory sessions (MVP). In prod: Redis/DB
 // =====================================================
-const sessions = new Map<string, any>();
+const sessions = new Map();
 
-function getSession(userId: string) {
+function getSession(userId) {
   if (!sessions.has(userId)) {
     sessions.set(userId, {
       createdAt: Date.now(),
@@ -192,7 +204,7 @@ function getSession(userId: string) {
       state: "idle",
 
       // lead fields
-      goal: null, // bot | demo | human
+      goal: null, // bot | prices | demo | human
       botType: null,
       sector: null,
       objective: null,
@@ -245,7 +257,7 @@ function assertEnv() {
 }
 assertEnv();
 
-function normalizeText(t: any) {
+function normalizeText(t) {
   return (t || "")
     .toLowerCase()
     .normalize("NFD")
@@ -254,7 +266,7 @@ function normalizeText(t: any) {
     .trim();
 }
 
-function verifyMetaSignature(req: any) {
+function verifyMetaSignature(req) {
   // Optional: if META_APP_SECRET not set, skip verification
   if (!META_APP_SECRET) return true;
 
@@ -275,12 +287,10 @@ function verifyMetaSignature(req: any) {
   }
 }
 
-function isGreeting(tNorm: string) {
+function isGreeting(tNorm) {
   const t = tNorm || "";
   const greetings = ["hola", "buenas", "buenos dias", "buen dia", "buenas tardes", "buenas noches", "saludos", "hey", "hi"];
-  const only =
-    greetings.some((g) => t === g || t.startsWith(g + " ")) ||
-    /^(hola+|buenas+|saludos+)\b/.test(t);
+  const only = greetings.some((g) => t === g || t.startsWith(g + " ")) || /^(hola+|buenas+|saludos+)\b/.test(t);
 
   const hasIntent =
     t.includes("precio") ||
@@ -295,31 +305,31 @@ function isGreeting(tNorm: string) {
   return only && !hasIntent && t.length <= 40;
 }
 
-function isHumanRequest(tNorm: string) {
+function isHumanRequest(tNorm) {
   const t = tNorm || "";
-  return ["humano", "asesor", "persona", "agente", "hablar contigo", "hablar con alguien", "llamar", "telefono", "teléfono", "llamada"].some(
-    (k) => t.includes(k)
+  return ["humano", "asesor", "persona", "agente", "hablar contigo", "hablar con alguien", "llamar", "telefono", "teléfono", "llamada"].some((k) =>
+    t.includes(k)
   );
 }
 
-function isPricingIntent(tNorm: string) {
+function isPricingIntent(tNorm) {
   const t = tNorm || "";
-  return ["precio", "cuanto cuesta", "cuánto cuesta", "costo", "inversion", "inversión", "cotizacion", "cotización", "tarifa", "planes"].some(
-    (k) => t.includes(k)
+  return ["precio", "cuanto cuesta", "cuánto cuesta", "costo", "inversion", "inversión", "cotizacion", "cotización", "tarifa", "planes"].some((k) =>
+    t.includes(k)
   );
 }
 
-function isDemoIntent(tNorm: string) {
+function isDemoIntent(tNorm) {
   const t = tNorm || "";
   return ["demo", "reunion", "reunión", "agendar", "cita", "llamada"].some((k) => t.includes(k));
 }
 
-function safeText(x: any, max = 400) {
+function safeText(x, max = 400) {
   const s = (x || "").toString().trim();
   return s.length > max ? s.slice(0, max) + "…" : s;
 }
 
-function digitsOnly(s: any) {
+function digitsOnly(s) {
   return (s || "").toString().replace(/[^\d]/g, "");
 }
 
@@ -327,7 +337,7 @@ function digitsOnly(s: any) {
 // WhatsApp Senders
 // ✅ NO TOCA TU LÓGICA: solo reporta OUTBOUND al Hub
 // =====================================================
-async function waSendText(to: any, body: any) {
+async function waSendText(to, body) {
   const url = `https://graph.facebook.com/v20.0/${PHONE_NUMBER_ID}/messages`;
   await axios.post(
     url,
@@ -350,7 +360,7 @@ async function waSendText(to: any, body: any) {
   });
 }
 
-async function waSendButtons(to: any, headerText: any, bodyText: any, buttons: any[]) {
+async function waSendButtons(to, headerText, bodyText, buttons) {
   // buttons: [{id,title}] max 3
   const url = `https://graph.facebook.com/v20.0/${PHONE_NUMBER_ID}/messages`;
   await axios.post(
@@ -376,8 +386,7 @@ async function waSendButtons(to: any, headerText: any, bodyText: any, buttons: a
 
   // ✅ Reportar al Hub (OUTBOUND) - representación de UI como texto
   const rendered =
-    `${headerText ? `*${headerText}*\n` : ""}${bodyText}\n\n` +
-    buttons.slice(0, 3).map((b) => `• [${b.id}] ${b.title}`).join("\n");
+    `${headerText ? `*${headerText}*\n` : ""}${bodyText}\n\n` + buttons.slice(0, 3).map((b) => `• [${b.id}] ${b.title}`).join("\n");
 
   await bothubReportMessage({
     direction: "OUTBOUND",
@@ -389,12 +398,12 @@ async function waSendButtons(to: any, headerText: any, bodyText: any, buttons: a
   });
 }
 
-async function waSendList(to: any, headerText: any, bodyText: any, buttonText: any, sectionTitle: any, rows: any[]) {
+async function waSendList(to, headerText, bodyText, buttonText, sectionTitle, rows) {
   // rows: [{id,title,description?}]
   const url = `https://graph.facebook.com/v20.0/${PHONE_NUMBER_ID}/messages`;
 
   // ✅ FIX: WhatsApp limita row.title a 24 caracteres
-  const clampTitle = (s: any) => {
+  const clampTitle = (s) => {
     const t = (s || "").toString().trim();
     return t.length > 24 ? t.slice(0, 24) : t;
   };
@@ -449,12 +458,11 @@ async function waSendList(to: any, headerText: any, bodyText: any, buttonText: a
 // Flow Copy
 // =====================================================
 function welcomeText() {
-  // ✅ Mantiene tu bienvenida, pero el flow será de 3 preguntas
-  return `👋 ¡Hola! Soy el asistente de *${BRAND_NAME}*.\nTe hago 3 preguntas y te recomiendo el bot ideal ✅\n\n¿Qué deseas hacer hoy?`;
+  return `👋 ¡Hola! Soy el asistente de *${BRAND_NAME}*.\nTe ayudo a elegir el bot ideal para tu negocio en 1 minuto ✅\n\n¿Qué deseas hacer hoy?`;
 }
 
 function antiRaroText() {
-  return `Totalmente válido 😄\nPara ayudarte rápido, elige una opción y seguimos.\n\n¿Quieres un bot o deseas agendar una demo?`;
+  return `Totalmente válido 😄\nEste chat *es parte del bot de ${BRAND_NAME}* (lo usamos para filtrar y cotizar rápido).\n\nPara ayudarte: ¿quieres un bot de *ventas*, *citas* o *soporte*?`;
 }
 
 function pricingInfoText() {
@@ -468,8 +476,8 @@ function doneCustomerText() {
 // =====================================================
 // Lead Summary + Handoff
 // =====================================================
-function buildLeadSummary(session: any, userPhone: any) {
-  const lines: string[] = [];
+function buildLeadSummary(session, userPhone) {
+  const lines = [];
   lines.push(`📩 *Nuevo lead Tekko*`);
   lines.push(`📞 WhatsApp: ${userPhone}`);
   if (session.name) lines.push(`👤 Nombre: ${session.name}`);
@@ -492,36 +500,44 @@ function buildLeadSummary(session: any, userPhone: any) {
   return lines.join("\n");
 }
 
-async function notifyAdmin(session: any, userPhone: any) {
+async function notifyAdmin(session, userPhone) {
   if (!ADMIN_PHONE) return;
   const summary = buildLeadSummary(session, userPhone);
   try {
     await waSendText(ADMIN_PHONE, summary);
-  } catch (e: any) {
-    console.error("Admin notify failed:", e?.response?.data || e?.message || e);
+  } catch (e) {
+    console.error("Admin notify failed:", (e && e.response && e.response.data) || (e && e.message) || e);
   }
 }
 
 // =====================================================
 // OpenAI (ChatGPT) - controlled sales assistant
 // =====================================================
-async function callOpenAI({ userId, userPhone, userText, session }: any) {
+async function callOpenAI({ userId, userPhone, userText, session }) {
   // keep short memory
   session.messages.push({ role: "user", content: safeText(userText, 600) });
   session.messages = session.messages.slice(-10);
+
+  const missing = [];
+  if (!session.botType) missing.push("tipo de bot");
+  if (!session.sector) missing.push("sector");
+  if (!session.objective) missing.push("objetivo");
 
   const system = {
     role: "system",
     content: `
 Eres un asistente de ventas por WhatsApp de ${BRAND_NAME}.
-Objetivo: ayudar al cliente a entender bots/automatización, responder dudas y mantenerlo en el flujo.
-Reglas:
+Objetivo: ayudar al cliente a entender bots/automatización, hacer preguntas para calificar y llevarlo a demo/cotización.
+
+REGLAS:
 - Responde corto, claro y práctico.
+- Si el mensaje del usuario es "raro" o fuera de tema, responde amable y TRAELO DE VUELTA al flujo.
+- IMPORTANTE: Si faltan datos clave (${missing.length ? missing.join(", ") : "ninguno"}), recuérdale responderlos y haz SOLO 1 pregunta a la vez (máx 1).
 - NO inventes precios exactos. Si preguntan precio, explica que depende y ofrece niveles (Starter/Pro/Premium) y pide datos mínimos.
-- El flujo tiene SOLO 3 preguntas clave: (1) tipo de bot (2) sector (3) objetivo.
-- Si el usuario se va por otro tema, responde con IA y luego recuérdale completar esas 3 preguntas con opciones.
 - Si el usuario pide hablar con humano, confirma y resume.
+- No pidas información sensible.
 - Idioma: español (tono friendly, profesional).
+
 Contexto actual del lead (puede estar incompleto):
 ${JSON.stringify(
   {
@@ -552,7 +568,11 @@ ${JSON.stringify(
     headers: { Authorization: `Bearer ${OPENAI_API_KEY}` },
   });
 
-  const text = resp.data?.choices?.[0]?.message?.content?.trim() || "";
+  const text = (resp.data && resp.data.choices && resp.data.choices[0] && resp.data.choices[0].message && resp.data.choices[0].message.content
+    ? resp.data.choices[0].message.content
+    : ""
+  ).trim();
+
   session.messages.push({ role: "assistant", content: safeText(text, 900) });
   session.messages = session.messages.slice(-10);
   return text;
@@ -561,165 +581,130 @@ ${JSON.stringify(
 // =====================================================
 // Incoming parsing (text + interactive + audio/location/etc)
 // =====================================================
-function extractIncomingText(msg: any) {
+function extractIncomingText(msg) {
   if (!msg) return "";
 
   // Texto normal
-  if (msg?.text?.body) return msg.text.body;
+  if (msg && msg.text && msg.text.body) return msg.text.body;
 
   // Botones/listas
-  if (msg?.type === "interactive" && msg?.interactive?.button_reply) {
+  if (msg && msg.type === "interactive" && msg.interactive && msg.interactive.button_reply) {
     const br = msg.interactive.button_reply;
     return br.id || br.title || "";
   }
-  if (msg?.type === "interactive" && msg?.interactive?.list_reply) {
+  if (msg && msg.type === "interactive" && msg.interactive && msg.interactive.list_reply) {
     const lr = msg.interactive.list_reply;
     return lr.id || lr.title || "";
   }
 
   // Nota de voz / audio
-  if (msg?.type === "audio" && msg?.audio?.id) {
+  if (msg && msg.type === "audio" && msg.audio && msg.audio.id) {
     return "[AUDIO]";
   }
 
   // Ubicación
-  if (msg?.type === "location" && msg?.location) {
+  if (msg && msg.type === "location" && msg.location) {
     const { latitude, longitude, name, address } = msg.location;
     return `📍 Ubicación: ${name || ""} ${address || ""} (${latitude}, ${longitude})`.trim();
   }
 
   // Imagen / video / documento / sticker
-  if (msg?.type === "image" && msg?.image?.id) return "[IMAGE]";
-  if (msg?.type === "video" && msg?.video?.id) return "[VIDEO]";
-  if (msg?.type === "document" && msg?.document?.id) return "[DOCUMENT]";
-  if (msg?.type === "sticker" && msg?.sticker?.id) return "[STICKER]";
+  if (msg && msg.type === "image" && msg.image && msg.image.id) return "[IMAGE]";
+  if (msg && msg.type === "video" && msg.video && msg.video.id) return "[VIDEO]";
+  if (msg && msg.type === "document" && msg.document && msg.document.id) return "[DOCUMENT]";
+  if (msg && msg.type === "sticker" && msg.sticker && msg.sticker.id) return "[STICKER]";
 
   // Contacto compartido
-  if (msg?.type === "contacts" && msg?.contacts?.length) return "[CONTACTS]";
+  if (msg && msg.type === "contacts" && msg.contacts && msg.contacts.length) return "[CONTACTS]";
 
   // Reacción
-  if (msg?.type === "reaction" && msg?.reaction) return `[REACTION] ${msg.reaction.emoji || ""}`.trim();
+  if (msg && msg.type === "reaction" && msg.reaction) return `[REACTION] ${msg.reaction.emoji || ""}`.trim();
 
   // Fallback
-  return `[${(msg?.type || "UNKNOWN").toUpperCase()}]`;
+  return `[${String((msg && msg.type) || "UNKNOWN").toUpperCase()}]`;
 }
 
-function extractReferral(msg: any) {
+function extractReferral(msg) {
   // Meta can send referral objects on some entrypoints
   // Keep raw to store for admin context
-  return msg?.referral || null;
+  return (msg && msg.referral) || null;
 }
 
 // =====================================================
 // Menus
 // =====================================================
-async function sendMainMenu(to: any) {
-  // ✅ CAMBIO: eliminar "Info / precios" del menú inicial
+async function sendMainMenu(to) {
+  // ✅ CAMBIO: quitar "Info / precios" del menú inicial
   await waSendButtons(to, BRAND_NAME, welcomeText(), [
     { id: "goal_bot", title: "🤖 Quiero un bot" },
     { id: "goal_demo", title: "🗓️ Agendar demo" },
-    { id: "goal_human", title: "📞 Hablar con asesor" },
   ]);
-  // "humano" as text option (por si no toca botón)
+
+  // "humano" as text option (because buttons max 3)
   await waSendText(to, `Si prefieres, escribe: *Humano* para hablar con un asesor.`);
 }
 
-async function sendBotTypes(to: any) {
-  await waSendList(
-    to,
-    "Tipos de bot",
-    "Perfecto ✅ (1/3) ¿Para qué lo necesitas principalmente?",
-    "Ver tipos",
-    "Opciones",
-    [
-      { id: "bot_sales", title: "🛒 Bot de Ventas", description: "Catálogo, pedidos, carrito, pagos" },
-      { id: "bot_appointments", title: "📅 Bot de Citas/Reservas", description: "Agenda automática, recordatorios" },
-      { id: "bot_support", title: "🧾 Bot de Soporte", description: "FAQ, seguimiento, reclamos" },
-      { id: "bot_delivery", title: "🏪 Bot Delivery/Rest.", description: "Menú, pedidos, ubicación" },
-      { id: "bot_services", title: "🧑‍💼 Bot para Servicios", description: "Cotizaciones, formularios, leads" },
-      { id: "bot_ai", title: "🧠 Bot con IA", description: "Responde como asesor con tu info" },
-      { id: "bot_automations", title: "🔁 Automatizaciones", description: "Sheets/CRM/Notion/Calendar" },
-      { id: "bot_recommend", title: "❓ No sé / Recom.", description: "Te hago 3 preguntas y te digo" },
-    ]
-  );
+async function sendBotTypes(to) {
+  await waSendList(to, "Tipos de bot", "Perfecto ✅ ¿Para qué lo necesitas principalmente?", "Ver tipos", "Opciones", [
+    { id: "bot_sales", title: "🛒 Bot de Ventas", description: "Catálogo, pedidos, carrito, pagos" },
+    { id: "bot_appointments", title: "📅 Bot de Citas/Reservas", description: "Agenda automática, recordatorios" },
+    { id: "bot_support", title: "🧾 Bot de Soporte", description: "FAQ, seguimiento, reclamos" },
+    { id: "bot_delivery", title: "🏪 Bot Delivery/Rest.", description: "Menú, pedidos, ubicación" },
+    { id: "bot_services", title: "🧑‍💼 Bot para Servicios", description: "Cotizaciones, formularios, leads" },
+    { id: "bot_ai", title: "🧠 Bot con IA", description: "Responde como asesor con tu info" },
+    { id: "bot_automations", title: "🔁 Automatizaciones", description: "Sheets/CRM/Notion/Calendar" },
+    { id: "bot_recommend", title: "❓ No sé / Recom.", description: "Te hago 3 preguntas y te digo" },
+  ]);
 }
 
-async function sendSectorMenu(to: any) {
-  await waSendList(
-    to,
-    "Sector",
-    "Listo ✅ (2/3) ¿A qué se dedica tu negocio?",
-    "Elegir",
-    "Sectores",
-    [
-      { id: "sector_restaurante", title: "Restaurante / Delivery" },
-      { id: "sector_tienda", title: "Tienda / eCommerce" },
-      { id: "sector_belleza", title: "Belleza / Spa / Salón" },
-      { id: "sector_salud", title: "Salud / Clínica" },
-      { id: "sector_inmobiliaria", title: "Inmobiliaria" },
-      { id: "sector_servicios", title: "Servicios Profesionales" },
-      { id: "sector_otro", title: "Otro" },
-    ]
-  );
+async function sendSectorMenu(to) {
+  await waSendList(to, "Sector", "¿A qué se dedica tu negocio?", "Elegir", "Sectores", [
+    { id: "sector_restaurante", title: "Restaurante / Delivery" },
+    { id: "sector_tienda", title: "Tienda / eCommerce" },
+    { id: "sector_belleza", title: "Belleza / Spa / Salón" },
+    { id: "sector_salud", title: "Salud / Clínica" },
+    { id: "sector_inmobiliaria", title: "Inmobiliaria" },
+    { id: "sector_servicios", title: "Servicios Profesionales" },
+    { id: "sector_otro", title: "Otro" },
+  ]);
 }
 
-async function sendObjectiveMenu(to: any) {
-  await waSendList(
-    to,
-    "Objetivo",
-    "Última ✅ (3/3) ¿Qué quieres lograr con el bot?",
-    "Elegir",
-    "Objetivos",
-    [
-      { id: "obj_vender", title: "Vender más" },
-      { id: "obj_ahorrar", title: "Ahorrar tiempo" },
-      { id: "obj_responder", title: "Responder más rápido" },
-      { id: "obj_agendar", title: "Agendar citas / reservas" },
-      { id: "obj_soporte", title: "Soporte / seguimiento" },
-      { id: "obj_otro", title: "Otro" },
-    ]
-  );
+async function sendObjectiveMenu(to) {
+  await waSendList(to, "Objetivo", "¿Qué quieres lograr con el bot?", "Elegir", "Objetivos", [
+    { id: "obj_vender", title: "Vender más" },
+    { id: "obj_ahorrar", title: "Ahorrar tiempo" },
+    { id: "obj_responder", title: "Responder más rápido" },
+    { id: "obj_agendar", title: "Agendar citas / reservas" },
+    { id: "obj_soporte", title: "Soporte / seguimiento" },
+    { id: "obj_otro", title: "Otro" },
+  ]);
 }
 
 // ✅ Solo WhatsApp (sin Instagram/Facebook como canal del bot)
-async function sendChannelsMenu(to: any) {
+async function sendChannelsMenu(to) {
   await waSendList(to, "Canal", "Este bot es para WhatsApp ✅", "Elegir", "Canal", [{ id: "ch_whatsapp", title: "WhatsApp" }]);
 }
 
-async function sendVolumeMenu(to: any) {
-  await waSendList(
-    to,
-    "Volumen",
-    "Aproximadamente, ¿cuántos mensajes recibes al día?",
-    "Elegir",
-    "Rangos",
-    [
-      { id: "vol_0_20", title: "0–20" },
-      { id: "vol_20_50", title: "20–50" },
-      { id: "vol_50_100", title: "50–100" },
-      { id: "vol_100_plus", title: "100+" },
-    ]
-  );
+async function sendVolumeMenu(to) {
+  await waSendList(to, "Volumen", "Aproximadamente, ¿cuántos mensajes recibes al día?", "Elegir", "Rangos", [
+    { id: "vol_0_20", title: "0–20" },
+    { id: "vol_20_50", title: "20–50" },
+    { id: "vol_50_100", title: "50–100" },
+    { id: "vol_100_plus", title: "100+" },
+  ]);
 }
 
-async function sendUrgencyMenu(to: any) {
-  await waSendList(
-    to,
-    "Urgencia",
-    "¿Para cuándo lo necesitas?",
-    "Elegir",
-    "Tiempos",
-    [
-      { id: "urg_week", title: "Esta semana" },
-      { id: "urg_2w", title: "En 2 semanas" },
-      { id: "urg_month", title: "Este mes" },
-      { id: "urg_eval", title: "Solo estoy evaluando" },
-    ]
-  );
+async function sendUrgencyMenu(to) {
+  await waSendList(to, "Urgencia", "¿Para cuándo lo necesitas?", "Elegir", "Tiempos", [
+    { id: "urg_week", title: "Esta semana" },
+    { id: "urg_2w", title: "En 2 semanas" },
+    { id: "urg_month", title: "Este mes" },
+    { id: "urg_eval", title: "Solo estoy evaluando" },
+  ]);
 }
 
 // (Se mantiene por compatibilidad, pero YA NO se envía automáticamente)
-async function sendCloseMenu(to: any) {
+async function sendCloseMenu(to) {
   await waSendButtons(to, "Siguiente paso", "¿Cómo quieres continuar?", [
     { id: "close_demo", title: "🗓️ Agendar demo" },
     { id: "close_quote", title: "💬 Cotización" },
@@ -730,12 +715,11 @@ async function sendCloseMenu(to: any) {
 // =====================================================
 // State machine
 // =====================================================
-function mapIdToLabel(id: any) {
-  const m: Record<string, string> = {
+function mapIdToLabel(id) {
+  const m = {
     goal_bot: "Quiero un bot",
-    goal_prices: "Info / precios", // ✅ se mantiene por compatibilidad, pero ya no está en el menú
+    goal_prices: "Info / precios",
     goal_demo: "Agendar demo",
-    goal_human: "Hablar con humano",
 
     bot_sales: "Bot de Ventas",
     bot_appointments: "Bot de Citas/Reservas",
@@ -776,22 +760,7 @@ function mapIdToLabel(id: any) {
   return m[id] || null;
 }
 
-// ✅ NEW: recordatorio inteligente del flujo (3 preguntas)
-async function remind3Questions(to: any, session: any) {
-  const missing: string[] = [];
-  if (!session.botType) missing.push("tipo de bot");
-  if (!session.sector) missing.push("sector");
-  if (!session.objective) missing.push("objetivo");
-
-  if (!missing.length) return;
-
-  const nice =
-    missing.length === 1 ? missing[0] : missing.length === 2 ? `${missing[0]} y ${missing[1]}` : `${missing[0]}, ${missing[1]} y ${missing[2]}`;
-
-  await waSendText(to, `Para avanzar rápido ✅ solo me falta: *${nice}*.\nElige una opción aquí 👇`);
-}
-
-async function stepAskNext(to: any, session: any) {
+async function stepAskNext(to, session) {
   // Decide next missing field based on flow
   if (!session.goal) {
     session.state = "idle";
@@ -799,26 +768,23 @@ async function stepAskNext(to: any, session: any) {
     return;
   }
 
-  // ✅ CAMBIO: ya no guiamos por "Info / precios" como menú (se mantiene compat si el usuario lo escribe)
   if (session.goal === "Info / precios") {
-    // Mantener compat: responder con info general y empujar a las 3 preguntas
+    // keep them in funnel: ask to recommend
     session.state = "collect_bot_type";
     await waSendText(to, pricingInfoText());
     await sendBotTypes(to);
     return;
   }
 
-  // ✅ CAMBIO: tanto "Quiero un bot" como "Agendar demo" usan las MISMAS 3 preguntas
   if (session.goal === "Agendar demo") {
-    if (!session.botType) {
-      session.state = "collect_bot_type";
-      await waSendText(to, `Perfecto ✅ Empecemos rápido con 3 preguntas.`);
-      await sendBotTypes(to);
-      return;
-    }
+    // ask basics then close with demo
+    session.state = "collect_bot_type";
+    await waSendText(to, `Perfecto ✅ Para preparar la demo, dime qué tipo de bot te interesa:`);
+    await sendBotTypes(to);
+    return;
   }
 
-  // goal: want bot / demo
+  // goal: want bot
   if (!session.botType) {
     session.state = "collect_bot_type";
     await sendBotTypes(to);
@@ -842,15 +808,71 @@ async function stepAskNext(to: any, session: any) {
     session.channels = "WhatsApp";
   }
 
-  // ✅ CAMBIO CLAVE: el flujo termina aquí (3 preguntas) — lo demás se mantiene en el código pero ya no es requerido
+  // =====================================================
+  // ✅ CAMBIO: SHORT FLOW (solo 3 preguntas)
+  // Ya tenemos: botType + sector + objective
+  // =====================================================
+  if (SHORT_FLOW) {
+    session.state = "done";
+    await waSendText(to, doneCustomerText());
+
+    // notificar admin ya con lo esencial
+    await notifyAdmin(session, to);
+    return;
+  }
+
+  // (se mantiene el flujo largo por compatibilidad)
+  if (!session.volume) {
+    session.state = "collect_volume";
+    await sendVolumeMenu(to);
+    return;
+  }
+
+  if (!session.urgency) {
+    session.state = "collect_urgency";
+    await sendUrgencyMenu(to);
+    return;
+  }
+
+  // identity capture
+  if (!session.name) {
+    session.state = "collect_name";
+    session.lastPrompt = `Dime tu *nombre y apellido* por favor 🙂`;
+    await waSendText(to, session.lastPrompt);
+    return;
+  }
+
+  if (!session.business) {
+    session.state = "collect_business";
+    session.lastPrompt = `¿Cómo se llama tu negocio? (o tu marca)`;
+    await waSendText(to, session.lastPrompt);
+    return;
+  }
+
+  if (!session.city) {
+    session.state = "collect_city";
+    session.lastPrompt = `¿En qué ciudad estás? (Ej: Santo Domingo)`;
+    await waSendText(to, session.lastPrompt);
+    return;
+  }
+
+  if (!session.link) {
+    session.state = "collect_link";
+    // ✅ Se mantiene: pedir Instagram y web (si tiene)
+    session.lastPrompt = `Opcional: pásame tu *Instagram o web* (si tienes) para entender mejor tu caso. Si no, escribe *No tengo*.`;
+    await waSendText(to, session.lastPrompt);
+    return;
+  }
+
+  // done
   session.state = "done";
   await waSendText(to, doneCustomerText());
 
-  // notify admin con lo que ya tenemos (sin obligar a más preguntas)
+  // notify admin with summary (cuando ya está completo)
   await notifyAdmin(session, to);
 }
 
-async function handleCloseChoice(to: any, session: any, choiceId: any) {
+async function handleCloseChoice(to, session, choiceId) {
   if (choiceId === "close_demo") {
     session.goal = session.goal || "Agendar demo";
     await waSendText(
@@ -883,7 +905,7 @@ async function handleCloseChoice(to: any, session: any, choiceId: any) {
 // body: { conversationId, waTo, text, agentUserId }
 // header: X-HUB-SIGNATURE (HMAC)
 // =====================================================
-app.post("/agent_message", async (req: any, res: any) => {
+app.post("/agent_message", async (req, res) => {
   try {
     if (!BOTHUB_WEBHOOK_SECRET) {
       return res.status(400).json({ error: "BOTHUB_WEBHOOK_SECRET not configured" });
@@ -919,14 +941,14 @@ app.post("/agent_message", async (req: any, res: any) => {
       to: String(waTo),
       body: String(text),
       source: "AGENT",
-      conversationId: req.body?.conversationId,
-      agentUserId: req.body?.agentUserId,
+      conversationId: req.body && req.body.conversationId,
+      agentUserId: req.body && req.body.agentUserId,
       kind: "TEXT",
     });
 
     return res.json({ ok: true });
-  } catch (e: any) {
-    console.error("agent_message error:", e?.response?.data || e?.message || e);
+  } catch (e) {
+    console.error("agent_message error:", (e && e.response && e.response.data) || (e && e.message) || e);
     return res.status(500).json({ error: "Internal error" });
   }
 });
@@ -934,7 +956,7 @@ app.post("/agent_message", async (req: any, res: any) => {
 // =====================================================
 // Webhook verify
 // =====================================================
-app.get("/webhook", (req: any, res: any) => {
+app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
   const challenge = req.query["hub.challenge"];
@@ -946,15 +968,15 @@ app.get("/webhook", (req: any, res: any) => {
 // =====================================================
 // Webhook receive
 // =====================================================
-app.post("/webhook", async (req: any, res: any) => {
+app.post("/webhook", async (req, res) => {
   try {
     if (!verifyMetaSignature(req)) return res.sendStatus(403);
 
-    const entry = req.body.entry?.[0];
-    const change = entry?.changes?.[0];
-    const value = change?.value;
+    const entry = req.body && req.body.entry && req.body.entry[0];
+    const change = entry && entry.changes && entry.changes[0];
+    const value = change && change.value;
 
-    const msg = value?.messages?.[0];
+    const msg = value && value.messages && value.messages[0];
     if (!msg) return res.sendStatus(200);
 
     const from = msg.from;
@@ -979,9 +1001,9 @@ app.post("/webhook", async (req: any, res: any) => {
       from: String(from),
       body: String(userText),
       source: "WHATSAPP",
-      waMessageId: msg?.id,
-      name: value?.contacts?.[0]?.profile?.name,
-      kind: inboundMeta?.kind || (msg?.type ? String(msg.type).toUpperCase() : "UNKNOWN"),
+      waMessageId: msg && msg.id,
+      name: value && value.contacts && value.contacts[0] && value.contacts[0].profile && value.contacts[0].profile.name,
+      kind: (inboundMeta && inboundMeta.kind) || (msg && msg.type ? String(msg.type).toUpperCase() : "UNKNOWN"),
       meta: inboundMeta,
     });
 
@@ -1000,22 +1022,11 @@ app.post("/webhook", async (req: any, res: any) => {
       return res.sendStatus(200);
     }
 
-    // Anti-raro phrase handling (se mantiene, pero ahora también dejamos que IA responda si hace falta)
+    // Anti-raro phrase handling
     if (tNorm.includes("como vendes") || tNorm.includes("y tu no tienes") || tNorm.includes("raro") || tNorm.includes("no tienes uno")) {
-      // ✅ CAMBIO: IA responde y luego recordamos las 3 preguntas
-      const aiReply = await callOpenAI({
-        userId: from,
-        userPhone: from,
-        userText,
-        session,
-      });
-
-      if (aiReply) await waSendText(from, aiReply);
+      // ✅ CAMBIO: ahora también puede caer a IA, pero mantenemos tu handler y luego empujamos al flujo
       await waSendText(from, antiRaroText());
-
       if (!session.goal) session.goal = "Quiero un bot";
-      session.state = "collect_bot_type";
-      await remind3Questions(from, session);
       await sendBotTypes(from);
       return res.sendStatus(200);
     }
@@ -1034,12 +1045,12 @@ app.post("/webhook", async (req: any, res: any) => {
     // Main menu choices
     if (userText === "goal_bot") {
       session.goal = "Quiero un bot";
-      await waSendText(from, `Perfecto ✅ Empecemos rápido con 3 preguntas.`);
+      await waSendText(from, `Perfecto ✅ Vamos a elegir el bot ideal.`);
       await stepAskNext(from, session);
       return res.sendStatus(200);
     }
     if (userText === "goal_prices") {
-      // compat: si alguien lo manda, respondemos pero seguimos con 3 preguntas
+      // (Se mantiene por compatibilidad aunque ya no está en el menú)
       session.goal = "Info / precios";
       await stepAskNext(from, session);
       return res.sendStatus(200);
@@ -1047,17 +1058,6 @@ app.post("/webhook", async (req: any, res: any) => {
     if (userText === "goal_demo") {
       session.goal = "Agendar demo";
       await stepAskNext(from, session);
-      return res.sendStatus(200);
-    }
-    if (userText === "goal_human") {
-      session.goal = "Hablar con humano";
-      let extraContact = "";
-      if (ADMIN_PHONE) {
-        const d = digitsOnly(ADMIN_PHONE);
-        extraContact = `\n\n📲 Puedes escribirnos aquí: https://wa.me/${d}`;
-      }
-      await waSendText(from, `Claro ✅ Te paso con un asesor.\nDime en una línea qué necesitas (tipo de bot y negocio).${extraContact}`);
-      await notifyAdmin({ ...session, notes: (session.notes || "") + " | Pidió HUMANO (menu)" }, from);
       return res.sendStatus(200);
     }
 
@@ -1075,26 +1075,21 @@ app.post("/webhook", async (req: any, res: any) => {
 
     // If user asks pricing at any time
     if (isPricingIntent(tNorm) && session.state !== "done") {
-      // ✅ CAMBIO: la IA responde y luego empujamos a las 3 preguntas (sin agregar más preguntas)
-      session.goal = session.goal || "Quiero un bot";
-      const aiReply = await callOpenAI({
-        userId: from,
-        userPhone: from,
-        userText,
-        session,
-      });
-      if (aiReply) await waSendText(from, aiReply);
-
-      // seguimos el flujo 3 preguntas
-      await remind3Questions(from, session);
-      await stepAskNext(from, session);
+      session.goal = session.goal || "Info / precios";
+      await waSendText(from, pricingInfoText());
+      if (!session.botType) {
+        await sendBotTypes(from);
+        session.state = "collect_bot_type";
+      } else {
+        await stepAskNext(from, session);
+      }
       return res.sendStatus(200);
     }
 
     // If user asks demo at any time
     if (isDemoIntent(tNorm) && session.state !== "done") {
       session.goal = session.goal || "Agendar demo";
-      await waSendText(from, `Perfecto ✅ Solo 3 preguntas rápidas y coordinamos.`);
+      await waSendText(from, `Perfecto ✅ Para preparar la demo, te haré unas preguntas rápidas.`);
       await stepAskNext(from, session);
       return res.sendStatus(200);
     }
@@ -1107,10 +1102,7 @@ app.post("/webhook", async (req: any, res: any) => {
         await stepAskNext(from, session);
         return res.sendStatus(200);
       }
-
-      // ✅ CAMBIO: si escribe algo raro, IA responde y lo re-encarrilamos (sin romper compat: aún aceptamos texto)
       if (tNorm.length >= 2) {
-        // aceptar texto libre como botType (compat)
         session.botType = safeText(userText, 80);
         await waSendText(from, `Perfecto ✅`);
         await stepAskNext(from, session);
@@ -1136,7 +1128,6 @@ app.post("/webhook", async (req: any, res: any) => {
 
     if (!session.channels) session.channels = "WhatsApp";
 
-    // ---- Se mantiene tu lógica existente (ya no es requerida por el flujo de 3 preguntas) ----
     if (session.state === "collect_volume") {
       if (label) session.volume = label;
       else session.volume = safeText(userText, 60);
@@ -1185,7 +1176,6 @@ app.post("/webhook", async (req: any, res: any) => {
       await stepAskNext(from, session);
       return res.sendStatus(200);
     }
-    // ---- fin compat ----
 
     if (session.state === "done") {
       if (tNorm.length > 2) {
@@ -1202,7 +1192,10 @@ app.post("/webhook", async (req: any, res: any) => {
       return res.sendStatus(200);
     }
 
-    // ✅ CAMBIO: si el usuario escribe "algo raro", la IA responde y luego lo re-encarrilamos a las 3 preguntas
+    // =====================================================
+    // ✅ CAMBIO: si escriben algo "raro", la IA responde y
+    // luego recordamos/pedimos lo que falte (máx 3 campos)
+    // =====================================================
     const aiReply = await callOpenAI({
       userId: from,
       userPhone: from,
@@ -1217,42 +1210,39 @@ app.post("/webhook", async (req: any, res: any) => {
 
     if (!session.channels) session.channels = "WhatsApp";
 
-    // ✅ CAMBIO CLAVE: solo 3 campos requeridos para terminar
-    const needsMore =
+    const needsMoreShort = !session.botType || !session.sector || !session.objective;
+
+    const needsMoreLong =
       !session.botType ||
       !session.sector ||
-      !session.objective;
+      !session.objective ||
+      !session.volume ||
+      !session.urgency ||
+      !session.name ||
+      !session.business ||
+      !session.city ||
+      !session.link;
+
+    const needsMore = SHORT_FLOW ? needsMoreShort : needsMoreLong;
 
     if (needsMore) {
-      await remind3Questions(from, session);
-      // re-mostrar el menú correcto según lo que falta (sin añadir preguntas extras)
-      if (!session.botType) {
-        session.state = "collect_bot_type";
-        await sendBotTypes(from);
-      } else if (!session.sector) {
-        session.state = "collect_sector";
-        await sendSectorMenu(from);
-      } else if (!session.objective) {
-        session.state = "collect_objective";
-        await sendObjectiveMenu(from);
-      } else {
-        await stepAskNext(from, session);
-      }
+      await stepAskNext(from, session);
     } else if (session.state !== "done") {
       session.state = "done";
       await waSendText(from, doneCustomerText());
+      // ✅ Nota: OUTBOUND al Hub ya se reporta dentro de waSendText()
       await notifyAdmin(session, from);
     }
 
     return res.sendStatus(200);
-  } catch (e: any) {
-    console.error("Webhook error:", e?.response?.data || e?.message || e);
+  } catch (e) {
+    console.error("Webhook error:", (e && e.response && e.response.data) || (e && e.message) || e);
     return res.sendStatus(200);
   }
 });
 
 // Health
-app.get("/", (_req: any, res: any) => res.send("OK"));
+app.get("/", (_req, res) => res.send("OK"));
 
 // Start
 app.listen(PORT, () => console.log(`✅ ${BRAND_NAME} bot running on :${PORT}`));
