@@ -93,20 +93,29 @@ function verifyHubSignature(reqBody, signatureHex, secret) {
 
 async function bothubReportMessage(payload) {
   // NO rompe tu bot si no está configurado
-  if (!BOTHUB_WEBHOOK_URL || !BOTHUB_WEBHOOK_SECRET) return;
+  if (!BOTHUB_WEBHOOK_URL || !BOTHUB_WEBHOOK_SECRET) return null;
 
   try {
     const sig = bothubHmacStable(payload, BOTHUB_WEBHOOK_SECRET);
-    await axios.post(BOTHUB_WEBHOOK_URL, payload, {
+    const res = await axios.post(BOTHUB_WEBHOOK_URL, payload, {
       headers: {
         "Content-Type": "application/json",
         "X-HUB-SIGNATURE": sig,
       },
       timeout: BOTHUB_TIMEOUT_MS,
+      validateStatus: () => true,
     });
+
+    // ✅ NEW: devolvemos el ack del Hub para respetar TAKEOVER (HUMAN)
+    if (res.status < 200 || res.status >= 300) {
+      throw new Error(`Bothub responded ${res.status}`);
+    }
+
+    return res.data || null;
   } catch (e) {
     // silencioso para no tumbar el bot
     console.error("Bothub report failed:", e?.response?.data || e?.message || e);
+    return null;
   }
 }
 
@@ -995,7 +1004,9 @@ app.post("/webhook", async (req, res) => {
 
     // ✅ NEW: Reportar INBOUND al Hub (texto + meta para audio/ubicación/attachments)
     const inboundMeta = extractInboundMeta(msg);
-    await bothubReportMessage({
+
+    // ✅ NEW: Capturar ACK del Hub para respetar TAKEOVER (HUMAN)
+    const hubAck = await bothubReportMessage({
       direction: "INBOUND",
       from: String(from),
       body: String(userText),
@@ -1005,6 +1016,15 @@ app.post("/webhook", async (req, res) => {
       kind: inboundMeta?.kind || (msg?.type ? String(msg.type).toUpperCase() : "UNKNOWN"),
       meta: inboundMeta,
     });
+
+    // ✅ ✅ ✅ TAKEOVER GATE:
+    // Si el Hub dice que está en HUMAN, el bot NO debe responder ni seguir el flujo.
+    if (
+      hubAck?.skipped === "HUMAN_TAKEOVER" ||
+      String(hubAck?.mode || "").toUpperCase() === "HUMAN"
+    ) {
+      return res.sendStatus(200);
+    }
 
     // Quick intents
     if (isHumanRequest(tNorm)) {
