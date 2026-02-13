@@ -37,6 +37,172 @@ const BOTHUB_WEBHOOK_SECRET = process.env.BOTHUB_WEBHOOK_SECRET || "";
 const BOTHUB_TIMEOUT_MS = Number(process.env.BOTHUB_TIMEOUT_MS || 6000);
 
 // =====================================================
+// ✅ PRO: Anti-duplicados + Lock (NO cambia tu lógica, solo evita reintentos)
+// - Dedupe por waMessageId (msg.id) para NO responder 2 veces
+// - Lock por conversación (from) para evitar carreras al “despertar”
+// - Opcional Upstash REST (sin instalar librerías):
+//    UPSTASH_REDIS_REST_URL, UPSTASH_REDIS_REST_TOKEN
+// =====================================================
+const DEDUPE_TTL_SEC = Number(process.env.DEDUPE_TTL_SEC || 60 * 60 * 48); // 48h
+const LOCK_TTL_SEC = Number(process.env.LOCK_TTL_SEC || 15);
+
+const UPSTASH_REDIS_REST_URL = process.env.UPSTASH_REDIS_REST_URL || "";
+const UPSTASH_REDIS_REST_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || "";
+
+// Fallback en memoria (si no hay Upstash)
+const __dedupeMem = new Map<string, number>(); // key -> expiresAt
+const __lockMem = new Map<string, number>(); // key -> expiresAt
+
+function memGet(key: string) {
+  const exp = __dedupeMem.get(key);
+  if (!exp) return null;
+  if (Date.now() > exp) {
+    __dedupeMem.delete(key);
+    return null;
+  }
+  return "1";
+}
+function memSet(key: string, ttlSec: number) {
+  __dedupeMem.set(key, Date.now() + ttlSec * 1000);
+}
+function memSetNX(key: string, ttlSec: number) {
+  const exp = __lockMem.get(key);
+  if (exp && Date.now() < exp) return false;
+  __lockMem.set(key, Date.now() + ttlSec * 1000);
+  return true;
+}
+function memDel(key: string) {
+  __lockMem.delete(key);
+}
+
+// Limpieza ligera (no toca lógica)
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, exp] of __dedupeMem.entries()) if (now > exp) __dedupeMem.delete(k);
+  for (const [k, exp] of __lockMem.entries()) if (now > exp) __lockMem.delete(k);
+}, 60 * 1000);
+
+// Upstash REST helpers (si configuras envs)
+async function upstashGet(key: string) {
+  if (!UPSTASH_REDIS_REST_URL || !UPSTASH_REDIS_REST_TOKEN) return null;
+  try {
+    const url = `${UPSTASH_REDIS_REST_URL}/get/${encodeURIComponent(key)}`;
+    const r = await axios.get(url, {
+      headers: { Authorization: `Bearer ${UPSTASH_REDIS_REST_TOKEN}` },
+      timeout: 3000,
+    });
+    // Upstash REST: { result: "1" } o { result: null }
+    return r?.data?.result ?? null;
+  } catch {
+    return null;
+  }
+}
+
+async function upstashSetEX(key: string, value: string, ttlSec: number) {
+  if (!UPSTASH_REDIS_REST_URL || !UPSTASH_REDIS_REST_TOKEN) return false;
+  try {
+    // SET key value EX ttl
+    const url = `${UPSTASH_REDIS_REST_URL}/set/${encodeURIComponent(key)}/${encodeURIComponent(value)}?EX=${ttlSec}`;
+    await axios.post(
+      url,
+      {},
+      {
+        headers: { Authorization: `Bearer ${UPSTASH_REDIS_REST_TOKEN}` },
+        timeout: 3000,
+      }
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function upstashSetNXEX(key: string, value: string, ttlSec: number) {
+  if (!UPSTASH_REDIS_REST_URL || !UPSTASH_REDIS_REST_TOKEN) return false;
+  try {
+    // SET key value NX EX ttl
+    const url = `${UPSTASH_REDIS_REST_URL}/set/${encodeURIComponent(key)}/${encodeURIComponent(value)}?NX=1&EX=${ttlSec}`;
+    const r = await axios.post(
+      url,
+      {},
+      {
+        headers: { Authorization: `Bearer ${UPSTASH_REDIS_REST_TOKEN}` },
+        timeout: 3000,
+      }
+    );
+    // Upstash devuelve "OK" o null dependiendo; si NX falla suele resultar null
+    const result = r?.data?.result;
+    return result === "OK";
+  } catch {
+    return false;
+  }
+}
+
+async function upstashDel(key: string) {
+  if (!UPSTASH_REDIS_REST_URL || !UPSTASH_REDIS_REST_TOKEN) return false;
+  try {
+    const url = `${UPSTASH_REDIS_REST_URL}/del/${encodeURIComponent(key)}`;
+    await axios.post(
+      url,
+      {},
+      {
+        headers: { Authorization: `Bearer ${UPSTASH_REDIS_REST_TOKEN}` },
+        timeout: 3000,
+      }
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// ✅ PRO: dedupe check (prefiere Upstash, fallback memoria)
+async function isDuplicateWaMessage(waMessageId: string) {
+  if (!waMessageId) return false;
+  const key = `dedupe:wa:${waMessageId}`;
+
+  // Upstash
+  if (UPSTASH_REDIS_REST_URL && UPSTASH_REDIS_REST_TOKEN) {
+    const existing = await upstashGet(key);
+    if (existing) return true;
+    // marca como visto (no importa si falla, cae a memoria)
+    await upstashSetEX(key, "1", DEDUPE_TTL_SEC);
+    return false;
+  }
+
+  // Memoria
+  const existing = memGet(key);
+  if (existing) return true;
+  memSet(key, DEDUPE_TTL_SEC);
+  return false;
+}
+
+// ✅ PRO: lock por conversación (from)
+async function acquireConvoLock(convoId: string) {
+  if (!convoId) return true;
+  const key = `lock:convo:${convoId}`;
+
+  if (UPSTASH_REDIS_REST_URL && UPSTASH_REDIS_REST_TOKEN) {
+    const ok = await upstashSetNXEX(key, "1", LOCK_TTL_SEC);
+    return ok;
+  }
+
+  return memSetNX(key, LOCK_TTL_SEC);
+}
+
+async function releaseConvoLock(convoId: string) {
+  if (!convoId) return;
+  const key = `lock:convo:${convoId}`;
+
+  if (UPSTASH_REDIS_REST_URL && UPSTASH_REDIS_REST_TOKEN) {
+    await upstashDel(key);
+    return;
+  }
+
+  memDel(key);
+}
+
+// =====================================================
 // Stable stringify para que firma HMAC sea igual al Hub
 // =====================================================
 function stableStringify(obj) {
@@ -254,6 +420,11 @@ function assertEnv() {
   // ✅ avisos útiles para Bothub (sin romper)
   if (!BOTHUB_WEBHOOK_URL) console.warn("⚠️ Missing ENV: BOTHUB_WEBHOOK_URL (Hub won't receive messages)");
   if (!BOTHUB_WEBHOOK_SECRET) console.warn("⚠️ Missing ENV: BOTHUB_WEBHOOK_SECRET (Hub signature will fail)");
+
+  // ✅ PRO: avisos para dedupe (sin romper)
+  if (!UPSTASH_REDIS_REST_URL || !UPSTASH_REDIS_REST_TOKEN) {
+    console.warn("ℹ️ DEDUPE/LOCK: usando memoria (recomendado configurar UPSTASH_REDIS_REST_URL/TOKEN para persistencia)");
+  }
 }
 assertEnv();
 
@@ -982,259 +1153,286 @@ app.post("/webhook", async (req, res) => {
     const from = msg.from;
     if (!from) return res.sendStatus(200);
 
-    const session = getSession(from);
+    // ✅ PRO: ACK inmediato para reducir reintentos del provider
+    // (NO cambia tu lógica: solo evita que Meta reintente por timeout)
+    res.sendStatus(200);
 
-    // Save referral if any
-    const referral = extractReferral(msg);
-    if (referral && !session.referral) session.referral = referral;
+    // ✅ PRO: procesa async (sin bloquear la respuesta)
+    setImmediate(async () => {
+      const convoId = String(from);
 
-    const raw = extractIncomingText(msg);
-    const userText = (raw || "").trim();
-    const tNorm = normalizeText(userText);
+      // ✅ PRO: lock por conversación para evitar carreras
+      const locked = await acquireConvoLock(convoId);
+      if (!locked) return;
 
-    if (!userText) return res.sendStatus(200);
+      try {
+        // ✅ PRO: dedupe por waMessageId
+        const waMessageId = (msg && msg.id) || "";
+        if (waMessageId) {
+          const dup = await isDuplicateWaMessage(String(waMessageId));
+          if (dup) return;
+        }
 
-    // ✅ NEW: Reportar INBOUND al Hub (texto + meta para audio/ubicación/attachments)
-    const inboundMeta = extractInboundMeta(msg);
-    await bothubReportMessage({
-      direction: "INBOUND",
-      from: String(from),
-      body: String(userText),
-      source: "WHATSAPP",
-      waMessageId: msg && msg.id,
-      name: value && value.contacts && value.contacts[0] && value.contacts[0].profile && value.contacts[0].profile.name,
-      kind: (inboundMeta && inboundMeta.kind) || (msg && msg.type ? String(msg.type).toUpperCase() : "UNKNOWN"),
-      meta: inboundMeta,
+        const session = getSession(from);
+
+        // Save referral if any
+        const referral = extractReferral(msg);
+        if (referral && !session.referral) session.referral = referral;
+
+        const raw = extractIncomingText(msg);
+        const userText = (raw || "").trim();
+        const tNorm = normalizeText(userText);
+
+        if (!userText) return;
+
+        // ✅ NEW: Reportar INBOUND al Hub (texto + meta para audio/ubicación/attachments)
+        const inboundMeta = extractInboundMeta(msg);
+        await bothubReportMessage({
+          direction: "INBOUND",
+          from: String(from),
+          body: String(userText),
+          source: "WHATSAPP",
+          waMessageId: msg && msg.id,
+          name: value && value.contacts && value.contacts[0] && value.contacts[0].profile && value.contacts[0].profile.name,
+          kind: (inboundMeta && inboundMeta.kind) || (msg && msg.type ? String(msg.type).toUpperCase() : "UNKNOWN"),
+          meta: inboundMeta,
+        });
+
+        // Quick intents
+        if (isHumanRequest(tNorm)) {
+          session.goal = session.goal || "Hablar con humano";
+
+          let extraContact = "";
+          if (ADMIN_PHONE) {
+            const d = digitsOnly(ADMIN_PHONE);
+            extraContact = `\n\n📲 Puedes escribirnos aquí: https://wa.me/${d}`;
+          }
+
+          await waSendText(from, `Claro ✅ Te paso con un asesor.\nDime en una línea qué necesitas (tipo de bot y negocio).${extraContact}`);
+          await notifyAdmin({ ...session, notes: (session.notes || "") + " | Pidió HUMANO (keyword)" }, from);
+          return;
+        }
+
+        // Anti-raro phrase handling
+        if (tNorm.includes("como vendes") || tNorm.includes("y tu no tienes") || tNorm.includes("raro") || tNorm.includes("no tienes uno")) {
+          // ✅ CAMBIO: ahora también puede caer a IA, pero mantenemos tu handler y luego empujamos al flujo
+          await waSendText(from, antiRaroText());
+          if (!session.goal) session.goal = "Quiero un bot";
+          await sendBotTypes(from);
+          return;
+        }
+
+        // If first time and greeting simple -> show menu once
+        if (!session.greeted && isGreeting(tNorm)) {
+          session.greeted = true;
+          await sendMainMenu(from);
+          return;
+        }
+        if (!session.greeted) session.greeted = true;
+
+        // Interpret menu button/list IDs
+        const label = mapIdToLabel(userText);
+
+        // Main menu choices
+        if (userText === "goal_bot") {
+          session.goal = "Quiero un bot";
+          await waSendText(from, `Perfecto ✅ Vamos a elegir el bot ideal.`);
+          await stepAskNext(from, session);
+          return;
+        }
+        if (userText === "goal_prices") {
+          // (Se mantiene por compatibilidad aunque ya no está en el menú)
+          session.goal = "Info / precios";
+          await stepAskNext(from, session);
+          return;
+        }
+        if (userText === "goal_demo") {
+          session.goal = "Agendar demo";
+          await stepAskNext(from, session);
+          return;
+        }
+
+        // Close choices
+        if (["close_demo", "close_quote", "close_human"].includes(userText)) {
+          await handleCloseChoice(from, session, userText);
+          return;
+        }
+
+        // If user typed "menu"
+        if (tNorm.includes("menu") || tNorm.includes("menú") || tNorm.includes("empezar") || tNorm === "inicio") {
+          await sendMainMenu(from);
+          return;
+        }
+
+        // If user asks pricing at any time
+        if (isPricingIntent(tNorm) && session.state !== "done") {
+          session.goal = session.goal || "Info / precios";
+          await waSendText(from, pricingInfoText());
+          if (!session.botType) {
+            await sendBotTypes(from);
+            session.state = "collect_bot_type";
+          } else {
+            await stepAskNext(from, session);
+          }
+          return;
+        }
+
+        // If user asks demo at any time
+        if (isDemoIntent(tNorm) && session.state !== "done") {
+          session.goal = session.goal || "Agendar demo";
+          await waSendText(from, `Perfecto ✅ Para preparar la demo, te haré unas preguntas rápidas.`);
+          await stepAskNext(from, session);
+          return;
+        }
+
+        // Handle structured flow states
+        if (session.state === "collect_bot_type") {
+          if ((label && label.startsWith("Bot")) || label === "Automatizaciones" || label === "No sé / Recomiéndame") {
+            session.botType = label;
+            await waSendText(from, `Genial ✅`);
+            await stepAskNext(from, session);
+            return;
+          }
+          if (tNorm.length >= 2) {
+            session.botType = safeText(userText, 80);
+            await waSendText(from, `Perfecto ✅`);
+            await stepAskNext(from, session);
+            return;
+          }
+        }
+
+        if (session.state === "collect_sector") {
+          if (label) session.sector = label;
+          else session.sector = safeText(userText, 80);
+          await waSendText(from, `✅`);
+          await stepAskNext(from, session);
+          return;
+        }
+
+        if (session.state === "collect_objective") {
+          if (label) session.objective = label;
+          else session.objective = safeText(userText, 120);
+          await waSendText(from, `✅`);
+          await stepAskNext(from, session);
+          return;
+        }
+
+        if (!session.channels) session.channels = "WhatsApp";
+
+        if (session.state === "collect_volume") {
+          if (label) session.volume = label;
+          else session.volume = safeText(userText, 60);
+          await waSendText(from, `✅`);
+          await stepAskNext(from, session);
+          return;
+        }
+
+        if (session.state === "collect_urgency") {
+          if (label) session.urgency = label;
+          else session.urgency = safeText(userText, 60);
+          await waSendText(from, `✅`);
+          await stepAskNext(from, session);
+          return;
+        }
+
+        if (session.state === "collect_name") {
+          if (tNorm.length < 3) {
+            await waSendText(from, `Por favor envíame tu *nombre y apellido* 🙂`);
+            return;
+          }
+          session.name = safeText(userText, 80);
+          await stepAskNext(from, session);
+          return;
+        }
+
+        if (session.state === "collect_business") {
+          if (tNorm.length < 2) {
+            await waSendText(from, `¿Cómo se llama tu negocio?`);
+            return;
+          }
+          session.business = safeText(userText, 100);
+          await stepAskNext(from, session);
+          return;
+        }
+
+        if (session.state === "collect_city") {
+          session.city = safeText(userText, 80);
+          await stepAskNext(from, session);
+          return;
+        }
+
+        if (session.state === "collect_link") {
+          if (tNorm.includes("no tengo") || tNorm === "no") session.link = "No tiene";
+          else session.link = safeText(userText, 200);
+          await stepAskNext(from, session);
+          return;
+        }
+
+        if (session.state === "done") {
+          if (tNorm.length > 2) {
+            session.notes = safeText((session.notes ? session.notes + " | " : "") + userText, 400);
+            await waSendText(from, `Perfecto ✅ Quedó anotado.\nSi deseas hablar con un asesor, escribe *Humano*.`);
+            await notifyAdmin({ ...session, notes: (session.notes || "") + " | Mensaje post-done" }, from);
+            return;
+          }
+        }
+
+        // If none matched and still no goal -> show menu
+        if (!session.goal) {
+          await sendMainMenu(from);
+          return;
+        }
+
+        // =====================================================
+        // ✅ CAMBIO: si escriben algo "raro", la IA responde y
+        // luego recordamos/pedimos lo que falte (máx 3 campos)
+        // =====================================================
+        const aiReply = await callOpenAI({
+          userId: from,
+          userPhone: from,
+          userText,
+          session,
+        });
+
+        if (aiReply) {
+          await waSendText(from, aiReply);
+          // ✅ Nota: OUTBOUND al Hub ya se reporta dentro de waSendText()
+        }
+
+        if (!session.channels) session.channels = "WhatsApp";
+
+        const needsMoreShort = !session.botType || !session.sector || !session.objective;
+
+        const needsMoreLong =
+          !session.botType ||
+          !session.sector ||
+          !session.objective ||
+          !session.volume ||
+          !session.urgency ||
+          !session.name ||
+          !session.business ||
+          !session.city ||
+          !session.link;
+
+        const needsMore = SHORT_FLOW ? needsMoreShort : needsMoreLong;
+
+        if (needsMore) {
+          await stepAskNext(from, session);
+        } else if (session.state !== "done") {
+          session.state = "done";
+          await waSendText(from, doneCustomerText());
+          // ✅ Nota: OUTBOUND al Hub ya se reporta dentro de waSendText()
+          await notifyAdmin(session, from);
+        }
+      } catch (e) {
+        console.error("Webhook error (async):", (e && e.response && e.response.data) || (e && e.message) || e);
+      } finally {
+        await releaseConvoLock(convoId);
+      }
     });
 
-    // Quick intents
-    if (isHumanRequest(tNorm)) {
-      session.goal = session.goal || "Hablar con humano";
-
-      let extraContact = "";
-      if (ADMIN_PHONE) {
-        const d = digitsOnly(ADMIN_PHONE);
-        extraContact = `\n\n📲 Puedes escribirnos aquí: https://wa.me/${d}`;
-      }
-
-      await waSendText(from, `Claro ✅ Te paso con un asesor.\nDime en una línea qué necesitas (tipo de bot y negocio).${extraContact}`);
-      await notifyAdmin({ ...session, notes: (session.notes || "") + " | Pidió HUMANO (keyword)" }, from);
-      return res.sendStatus(200);
-    }
-
-    // Anti-raro phrase handling
-    if (tNorm.includes("como vendes") || tNorm.includes("y tu no tienes") || tNorm.includes("raro") || tNorm.includes("no tienes uno")) {
-      // ✅ CAMBIO: ahora también puede caer a IA, pero mantenemos tu handler y luego empujamos al flujo
-      await waSendText(from, antiRaroText());
-      if (!session.goal) session.goal = "Quiero un bot";
-      await sendBotTypes(from);
-      return res.sendStatus(200);
-    }
-
-    // If first time and greeting simple -> show menu once
-    if (!session.greeted && isGreeting(tNorm)) {
-      session.greeted = true;
-      await sendMainMenu(from);
-      return res.sendStatus(200);
-    }
-    if (!session.greeted) session.greeted = true;
-
-    // Interpret menu button/list IDs
-    const label = mapIdToLabel(userText);
-
-    // Main menu choices
-    if (userText === "goal_bot") {
-      session.goal = "Quiero un bot";
-      await waSendText(from, `Perfecto ✅ Vamos a elegir el bot ideal.`);
-      await stepAskNext(from, session);
-      return res.sendStatus(200);
-    }
-    if (userText === "goal_prices") {
-      // (Se mantiene por compatibilidad aunque ya no está en el menú)
-      session.goal = "Info / precios";
-      await stepAskNext(from, session);
-      return res.sendStatus(200);
-    }
-    if (userText === "goal_demo") {
-      session.goal = "Agendar demo";
-      await stepAskNext(from, session);
-      return res.sendStatus(200);
-    }
-
-    // Close choices
-    if (["close_demo", "close_quote", "close_human"].includes(userText)) {
-      await handleCloseChoice(from, session, userText);
-      return res.sendStatus(200);
-    }
-
-    // If user typed "menu"
-    if (tNorm.includes("menu") || tNorm.includes("menú") || tNorm.includes("empezar") || tNorm === "inicio") {
-      await sendMainMenu(from);
-      return res.sendStatus(200);
-    }
-
-    // If user asks pricing at any time
-    if (isPricingIntent(tNorm) && session.state !== "done") {
-      session.goal = session.goal || "Info / precios";
-      await waSendText(from, pricingInfoText());
-      if (!session.botType) {
-        await sendBotTypes(from);
-        session.state = "collect_bot_type";
-      } else {
-        await stepAskNext(from, session);
-      }
-      return res.sendStatus(200);
-    }
-
-    // If user asks demo at any time
-    if (isDemoIntent(tNorm) && session.state !== "done") {
-      session.goal = session.goal || "Agendar demo";
-      await waSendText(from, `Perfecto ✅ Para preparar la demo, te haré unas preguntas rápidas.`);
-      await stepAskNext(from, session);
-      return res.sendStatus(200);
-    }
-
-    // Handle structured flow states
-    if (session.state === "collect_bot_type") {
-      if ((label && label.startsWith("Bot")) || label === "Automatizaciones" || label === "No sé / Recomiéndame") {
-        session.botType = label;
-        await waSendText(from, `Genial ✅`);
-        await stepAskNext(from, session);
-        return res.sendStatus(200);
-      }
-      if (tNorm.length >= 2) {
-        session.botType = safeText(userText, 80);
-        await waSendText(from, `Perfecto ✅`);
-        await stepAskNext(from, session);
-        return res.sendStatus(200);
-      }
-    }
-
-    if (session.state === "collect_sector") {
-      if (label) session.sector = label;
-      else session.sector = safeText(userText, 80);
-      await waSendText(from, `✅`);
-      await stepAskNext(from, session);
-      return res.sendStatus(200);
-    }
-
-    if (session.state === "collect_objective") {
-      if (label) session.objective = label;
-      else session.objective = safeText(userText, 120);
-      await waSendText(from, `✅`);
-      await stepAskNext(from, session);
-      return res.sendStatus(200);
-    }
-
-    if (!session.channels) session.channels = "WhatsApp";
-
-    if (session.state === "collect_volume") {
-      if (label) session.volume = label;
-      else session.volume = safeText(userText, 60);
-      await waSendText(from, `✅`);
-      await stepAskNext(from, session);
-      return res.sendStatus(200);
-    }
-
-    if (session.state === "collect_urgency") {
-      if (label) session.urgency = label;
-      else session.urgency = safeText(userText, 60);
-      await waSendText(from, `✅`);
-      await stepAskNext(from, session);
-      return res.sendStatus(200);
-    }
-
-    if (session.state === "collect_name") {
-      if (tNorm.length < 3) {
-        await waSendText(from, `Por favor envíame tu *nombre y apellido* 🙂`);
-        return res.sendStatus(200);
-      }
-      session.name = safeText(userText, 80);
-      await stepAskNext(from, session);
-      return res.sendStatus(200);
-    }
-
-    if (session.state === "collect_business") {
-      if (tNorm.length < 2) {
-        await waSendText(from, `¿Cómo se llama tu negocio?`);
-        return res.sendStatus(200);
-      }
-      session.business = safeText(userText, 100);
-      await stepAskNext(from, session);
-      return res.sendStatus(200);
-    }
-
-    if (session.state === "collect_city") {
-      session.city = safeText(userText, 80);
-      await stepAskNext(from, session);
-      return res.sendStatus(200);
-    }
-
-    if (session.state === "collect_link") {
-      if (tNorm.includes("no tengo") || tNorm === "no") session.link = "No tiene";
-      else session.link = safeText(userText, 200);
-      await stepAskNext(from, session);
-      return res.sendStatus(200);
-    }
-
-    if (session.state === "done") {
-      if (tNorm.length > 2) {
-        session.notes = safeText((session.notes ? session.notes + " | " : "") + userText, 400);
-        await waSendText(from, `Perfecto ✅ Quedó anotado.\nSi deseas hablar con un asesor, escribe *Humano*.`);
-        await notifyAdmin({ ...session, notes: (session.notes || "") + " | Mensaje post-done" }, from);
-        return res.sendStatus(200);
-      }
-    }
-
-    // If none matched and still no goal -> show menu
-    if (!session.goal) {
-      await sendMainMenu(from);
-      return res.sendStatus(200);
-    }
-
-    // =====================================================
-    // ✅ CAMBIO: si escriben algo "raro", la IA responde y
-    // luego recordamos/pedimos lo que falte (máx 3 campos)
-    // =====================================================
-    const aiReply = await callOpenAI({
-      userId: from,
-      userPhone: from,
-      userText,
-      session,
-    });
-
-    if (aiReply) {
-      await waSendText(from, aiReply);
-      // ✅ Nota: OUTBOUND al Hub ya se reporta dentro de waSendText()
-    }
-
-    if (!session.channels) session.channels = "WhatsApp";
-
-    const needsMoreShort = !session.botType || !session.sector || !session.objective;
-
-    const needsMoreLong =
-      !session.botType ||
-      !session.sector ||
-      !session.objective ||
-      !session.volume ||
-      !session.urgency ||
-      !session.name ||
-      !session.business ||
-      !session.city ||
-      !session.link;
-
-    const needsMore = SHORT_FLOW ? needsMoreShort : needsMoreLong;
-
-    if (needsMore) {
-      await stepAskNext(from, session);
-    } else if (session.state !== "done") {
-      session.state = "done";
-      await waSendText(from, doneCustomerText());
-      // ✅ Nota: OUTBOUND al Hub ya se reporta dentro de waSendText()
-      await notifyAdmin(session, from);
-    }
-
-    return res.sendStatus(200);
+    // ✅ Ya respondimos arriba (ACK)
+    return;
   } catch (e) {
     console.error("Webhook error:", (e && e.response && e.response.data) || (e && e.message) || e);
     return res.sendStatus(200);
@@ -1243,6 +1441,9 @@ app.post("/webhook", async (req, res) => {
 
 // Health
 app.get("/", (_req, res) => res.send("OK"));
+
+// ✅ NEW: Health liviano para ping externo (evitar sleep en free)
+app.get("/health", (_req, res) => res.json({ ok: true, ts: Date.now() }));
 
 // Start
 app.listen(PORT, () => console.log(`✅ ${BRAND_NAME} bot running on :${PORT}`));
