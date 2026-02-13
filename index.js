@@ -223,11 +223,6 @@ function bothubHmacJson(payload, secret) {
 }
 
 // ✅ NEW: acepta varias formas de header de firma (por compatibilidad)
-// - X-HUB-SIGNATURE
-// - x-hub-signature
-// - X-Hub-Signature / x-hub-signature
-// - X-HUB-SIGNATURE-256 / X-Hub-Signature-256 (por si alguien lo manda así)
-// y permite formato "sha256=<hex>" o "<hex>"
 function getHubSignature(req) {
   const h =
     req.get("X-HUB-SIGNATURE") ||
@@ -1101,9 +1096,6 @@ app.post("/agent_message", async (req, res) => {
     if (!text || !String(text).trim()) return res.status(400).json({ error: "text is required" });
 
     // Enviar por WhatsApp como AGENTE (humano)
-    // ⚠️ Nota: waSendText reporta al Hub como source BOT (por tu implementación).
-    // Para no duplicar y para mantener tu lógica, lo dejamos igual.
-    // Igual reportamos luego el OUTBOUND como AGENT para BotHub.
     await waSendText(String(waTo), String(text));
 
     // Reportar al Hub como OUTBOUND (source AGENT)
@@ -1154,7 +1146,6 @@ app.post("/webhook", async (req, res) => {
     if (!from) return res.sendStatus(200);
 
     // ✅ PRO: ACK inmediato para reducir reintentos del provider
-    // (NO cambia tu lógica: solo evita que Meta reintente por timeout)
     res.sendStatus(200);
 
     // ✅ PRO: procesa async (sin bloquear la respuesta)
@@ -1215,7 +1206,6 @@ app.post("/webhook", async (req, res) => {
 
         // Anti-raro phrase handling
         if (tNorm.includes("como vendes") || tNorm.includes("y tu no tienes") || tNorm.includes("raro") || tNorm.includes("no tienes uno")) {
-          // ✅ CAMBIO: ahora también puede caer a IA, pero mantenemos tu handler y luego empujamos al flujo
           await waSendText(from, antiRaroText());
           if (!session.goal) session.goal = "Quiero un bot";
           await sendBotTypes(from);
@@ -1241,7 +1231,6 @@ app.post("/webhook", async (req, res) => {
           return;
         }
         if (userText === "goal_prices") {
-          // (Se mantiene por compatibilidad aunque ya no está en el menú)
           session.goal = "Info / precios";
           await stepAskNext(from, session);
           return;
@@ -1383,10 +1372,6 @@ app.post("/webhook", async (req, res) => {
           return;
         }
 
-        // =====================================================
-        // ✅ CAMBIO: si escriben algo "raro", la IA responde y
-        // luego recordamos/pedimos lo que falte (máx 3 campos)
-        // =====================================================
         const aiReply = await callOpenAI({
           userId: from,
           userPhone: from,
@@ -1396,7 +1381,6 @@ app.post("/webhook", async (req, res) => {
 
         if (aiReply) {
           await waSendText(from, aiReply);
-          // ✅ Nota: OUTBOUND al Hub ya se reporta dentro de waSendText()
         }
 
         if (!session.channels) session.channels = "WhatsApp";
@@ -1421,7 +1405,6 @@ app.post("/webhook", async (req, res) => {
         } else if (session.state !== "done") {
           session.state = "done";
           await waSendText(from, doneCustomerText());
-          // ✅ Nota: OUTBOUND al Hub ya se reporta dentro de waSendText()
           await notifyAdmin(session, from);
         }
       } catch (e) {
