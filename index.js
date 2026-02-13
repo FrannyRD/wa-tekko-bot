@@ -50,10 +50,10 @@ const UPSTASH_REDIS_REST_URL = process.env.UPSTASH_REDIS_REST_URL || "";
 const UPSTASH_REDIS_REST_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || "";
 
 // Fallback en memoria (si no hay Upstash)
-const __dedupeMem = new Map<string, number>(); // key -> expiresAt
-const __lockMem = new Map<string, number>(); // key -> expiresAt
+const __dedupeMem = new Map(); // key -> expiresAt
+const __lockMem = new Map(); // key -> expiresAt
 
-function memGet(key: string) {
+function memGet(key) {
   const exp = __dedupeMem.get(key);
   if (!exp) return null;
   if (Date.now() > exp) {
@@ -62,16 +62,16 @@ function memGet(key: string) {
   }
   return "1";
 }
-function memSet(key: string, ttlSec: number) {
+function memSet(key, ttlSec) {
   __dedupeMem.set(key, Date.now() + ttlSec * 1000);
 }
-function memSetNX(key: string, ttlSec: number) {
+function memSetNX(key, ttlSec) {
   const exp = __lockMem.get(key);
   if (exp && Date.now() < exp) return false;
   __lockMem.set(key, Date.now() + ttlSec * 1000);
   return true;
 }
-function memDel(key: string) {
+function memDel(key) {
   __lockMem.delete(key);
 }
 
@@ -83,7 +83,7 @@ setInterval(() => {
 }, 60 * 1000);
 
 // Upstash REST helpers (si configuras envs)
-async function upstashGet(key: string) {
+async function upstashGet(key) {
   if (!UPSTASH_REDIS_REST_URL || !UPSTASH_REDIS_REST_TOKEN) return null;
   try {
     const url = `${UPSTASH_REDIS_REST_URL}/get/${encodeURIComponent(key)}`;
@@ -98,7 +98,7 @@ async function upstashGet(key: string) {
   }
 }
 
-async function upstashSetEX(key: string, value: string, ttlSec: number) {
+async function upstashSetEX(key, value, ttlSec) {
   if (!UPSTASH_REDIS_REST_URL || !UPSTASH_REDIS_REST_TOKEN) return false;
   try {
     // SET key value EX ttl
@@ -117,7 +117,7 @@ async function upstashSetEX(key: string, value: string, ttlSec: number) {
   }
 }
 
-async function upstashSetNXEX(key: string, value: string, ttlSec: number) {
+async function upstashSetNXEX(key, value, ttlSec) {
   if (!UPSTASH_REDIS_REST_URL || !UPSTASH_REDIS_REST_TOKEN) return false;
   try {
     // SET key value NX EX ttl
@@ -138,7 +138,7 @@ async function upstashSetNXEX(key: string, value: string, ttlSec: number) {
   }
 }
 
-async function upstashDel(key: string) {
+async function upstashDel(key) {
   if (!UPSTASH_REDIS_REST_URL || !UPSTASH_REDIS_REST_TOKEN) return false;
   try {
     const url = `${UPSTASH_REDIS_REST_URL}/del/${encodeURIComponent(key)}`;
@@ -157,7 +157,7 @@ async function upstashDel(key: string) {
 }
 
 // ✅ PRO: dedupe check (prefiere Upstash, fallback memoria)
-async function isDuplicateWaMessage(waMessageId: string) {
+async function isDuplicateWaMessage(waMessageId) {
   if (!waMessageId) return false;
   const key = `dedupe:wa:${waMessageId}`;
 
@@ -178,7 +178,7 @@ async function isDuplicateWaMessage(waMessageId: string) {
 }
 
 // ✅ PRO: lock por conversación (from)
-async function acquireConvoLock(convoId: string) {
+async function acquireConvoLock(convoId) {
   if (!convoId) return true;
   const key = `lock:convo:${convoId}`;
 
@@ -190,7 +190,7 @@ async function acquireConvoLock(convoId: string) {
   return memSetNX(key, LOCK_TTL_SEC);
 }
 
-async function releaseConvoLock(convoId: string) {
+async function releaseConvoLock(convoId) {
   if (!convoId) return;
   const key = `lock:convo:${convoId}`;
 
