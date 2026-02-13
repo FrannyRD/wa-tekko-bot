@@ -198,7 +198,6 @@ async function isDuplicateWaMessage(waMessageId) {
 
 // ✅ PRO: lock por conversación (from)
 // ✅ FIX: si Upstash falla o no adquiere lock, cae a memoria (no “mutea”)
-// Nota: esto mantiene tu idea de lock sin romper el bot
 async function acquireConvoLock(convoId) {
   if (!convoId) return true;
   const key = `lock:convo:${convoId}`;
@@ -457,6 +456,52 @@ function normalizeText(t) {
     .replace(/\p{Diacritic}/gu, "")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+// ✅ FIX: normalizar sin emojis/símbolos para comparar títulos de botones
+function normalizeNoEmoji(t) {
+  return (t || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/\p{Diacritic}/gu, "")
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+// ✅ FIX: Resolver cuando Meta manda el *title* (ej: "🤖 Quiero un bot") en vez del id ("goal_bot")
+function resolveActionId(userText, tNorm) {
+  const raw = String(userText || "").trim();
+  if (!raw) return "";
+
+  // Si ya viene como id, perfecto:
+  const knownIds = new Set([
+    "goal_bot",
+    "goal_demo",
+    "goal_prices",
+    "close_demo",
+    "close_quote",
+    "close_human",
+  ]);
+  if (knownIds.has(raw)) return raw;
+
+  const n = normalizeNoEmoji(raw);
+  const tn = normalizeNoEmoji(tNorm || raw);
+
+  // Main menu (por texto/título)
+  if (n === "quiero un bot" || tn === "quiero un bot" || tn.includes("quiero un bot")) return "goal_bot";
+  if (n === "agendar demo" || tn === "agendar demo" || tn.includes("agendar demo") || tn.includes("agenda demo"))
+    return "goal_demo";
+
+  // Close menu (por texto/título)
+  if (n === "cotizacion" || tn.includes("cotizacion") || tn.includes("cotización")) return "close_quote";
+  if (n.includes("hablar humano") || tn.includes("hablar humano") || tn === "humano") return "close_human";
+  if (n.includes("agendar demo") || tn.includes("agendar demo") || tn.includes("agenda demo")) return "close_demo";
+
+  // Info/precios (si alguna vez lo agregas al menu)
+  if (tn.includes("precio") || tn.includes("precios") || tn.includes("info")) return "";
+
+  return "";
 }
 
 function verifyMetaSignature(req) {
@@ -1147,7 +1192,6 @@ app.get("/webhook", (req, res) => {
 // =====================================================
 // Webhook receive
 // ✅ CAMBIO PRO: ACK inmediato + proceso async + dedupe + lock
-// (la lógica interna es la misma, solo se mueve a setImmediate)
 // =====================================================
 app.post("/webhook", async (req, res) => {
   try {
@@ -1163,10 +1207,9 @@ app.post("/webhook", async (req, res) => {
     const from = msg.from;
     if (!from) return res.sendStatus(200);
 
-    // ✅ ACK inmediato para que Meta no reintente (y no duplique)
+    // ✅ ACK inmediato
     res.sendStatus(200);
 
-    // ✅ Proceso async (sin bloquear la respuesta)
     setImmediate(async () => {
       const convoId = String(from);
 
@@ -1177,7 +1220,6 @@ app.post("/webhook", async (req, res) => {
       }
 
       try {
-        // ✅ Dedupe por msg.id
         const waMessageId = (msg && msg.id) || "";
         if (waMessageId) {
           const dup = await isDuplicateWaMessage(String(waMessageId));
@@ -1194,6 +1236,10 @@ app.post("/webhook", async (req, res) => {
         const tNorm = normalizeText(userText);
 
         if (!userText) return;
+
+        // ✅ FIX: convertir títulos (ej "🤖 Quiero un bot") a ids (goal_bot)
+        const resolved = resolveActionId(userText, tNorm);
+        const userKey = resolved || userText;
 
         // Reportar INBOUND al Hub
         const inboundMeta = extractInboundMeta(msg);
@@ -1257,27 +1303,28 @@ app.post("/webhook", async (req, res) => {
         }
         if (!session.greeted) session.greeted = true;
 
-        const label = mapIdToLabel(userText);
+        const label = mapIdToLabel(userKey);
 
-        if (userText === "goal_bot") {
+        // ✅ Aquí usamos userKey (id resuelto) en vez de userText
+        if (userKey === "goal_bot") {
           session.goal = "Quiero un bot";
           await waSendText(from, `Perfecto ✅ Vamos a elegir el bot ideal.`);
           await stepAskNext(from, session);
           return;
         }
-        if (userText === "goal_prices") {
+        if (userKey === "goal_prices") {
           session.goal = "Info / precios";
           await stepAskNext(from, session);
           return;
         }
-        if (userText === "goal_demo") {
+        if (userKey === "goal_demo") {
           session.goal = "Agendar demo";
           await stepAskNext(from, session);
           return;
         }
 
-        if (["close_demo", "close_quote", "close_human"].includes(userText)) {
-          await handleCloseChoice(from, session, userText);
+        if (["close_demo", "close_quote", "close_human"].includes(userKey)) {
+          await handleCloseChoice(from, session, userKey);
           return;
         }
 
