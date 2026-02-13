@@ -171,6 +171,7 @@ async function upstashDel(key) {
 }
 
 // ✅ PRO: dedupe check (prefiere Upstash, fallback memoria)
+// ✅ FIX: si Upstash falla, NO te quedas mudo: cae a memoria
 async function isDuplicateWaMessage(waMessageId) {
   if (!waMessageId) return false;
   const key = `dedupe:wa:${waMessageId}`;
@@ -178,7 +179,14 @@ async function isDuplicateWaMessage(waMessageId) {
   if (UPSTASH_REDIS_REST_URL && UPSTASH_REDIS_REST_TOKEN) {
     const existing = await upstashGet(key);
     if (existing) return true;
-    await upstashSetEX(key, "1", DEDUPE_TTL_SEC);
+
+    const ok = await upstashSetEX(key, "1", DEDUPE_TTL_SEC);
+    if (ok) return false;
+
+    // fallback memoria si Upstash falló
+    const memExisting = memGet(__dedupeMem, key);
+    if (memExisting) return true;
+    memSet(__dedupeMem, key, DEDUPE_TTL_SEC);
     return false;
   }
 
@@ -189,13 +197,18 @@ async function isDuplicateWaMessage(waMessageId) {
 }
 
 // ✅ PRO: lock por conversación (from)
+// ✅ FIX: si Upstash falla o no adquiere lock, cae a memoria (no “mutea”)
+// Nota: esto mantiene tu idea de lock sin romper el bot
 async function acquireConvoLock(convoId) {
   if (!convoId) return true;
   const key = `lock:convo:${convoId}`;
 
   if (UPSTASH_REDIS_REST_URL && UPSTASH_REDIS_REST_TOKEN) {
     const ok = await upstashSetNXEX(key, "1", LOCK_TTL_SEC);
-    return ok;
+    if (ok) return true;
+
+    // fallback memoria si Upstash falló / no respondió OK
+    return memSetNX(__lockMem, key, LOCK_TTL_SEC);
   }
 
   return memSetNX(__lockMem, key, LOCK_TTL_SEC);
@@ -1158,7 +1171,10 @@ app.post("/webhook", async (req, res) => {
       const convoId = String(from);
 
       const locked = await acquireConvoLock(convoId);
-      if (!locked) return;
+      if (!locked) {
+        console.warn("⚠️ Lock no adquirido, skipping message", { from: convoId });
+        return;
+      }
 
       try {
         // ✅ Dedupe por msg.id
