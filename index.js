@@ -197,7 +197,9 @@ async function isDuplicateWaMessage(waMessageId) {
 }
 
 // ✅ PRO: lock por conversación (from)
-// ✅ FIX: si Upstash falla o no adquiere lock, cae a memoria (no “mutea”)
+// ✅ FIX: si Upstash devuelve false, distinguimos:
+// - si la key existe => lock real => return false (skip)
+// - si no existe (o error) => fallback memoria
 async function acquireConvoLock(convoId) {
   if (!convoId) return true;
   const key = `lock:convo:${convoId}`;
@@ -206,23 +208,27 @@ async function acquireConvoLock(convoId) {
     const ok = await upstashSetNXEX(key, "1", LOCK_TTL_SEC);
     if (ok) return true;
 
-    // fallback memoria si Upstash falló / no respondió OK
+    const existing = await upstashGet(key);
+    if (existing) return false;
+
+    // fallback memoria si Upstash falló (o no respondió)
     return memSetNX(__lockMem, key, LOCK_TTL_SEC);
   }
 
   return memSetNX(__lockMem, key, LOCK_TTL_SEC);
 }
 
+// ✅ FIX CRÍTICO: siempre liberar lock en memoria + intentar Upstash
 async function releaseConvoLock(convoId) {
   if (!convoId) return;
   const key = `lock:convo:${convoId}`;
 
+  // libera fallback memoria SIEMPRE
+  memDel(__lockMem, key);
+
   if (UPSTASH_REDIS_REST_URL && UPSTASH_REDIS_REST_TOKEN) {
     await upstashDel(key);
-    return;
   }
-
-  memDel(__lockMem, key);
 }
 
 // =====================================================
@@ -458,7 +464,7 @@ function normalizeText(t) {
     .trim();
 }
 
-// ✅ FIX: normalizar sin emojis/símbolos para comparar títulos de botones
+// ✅ helper: normaliza y quita emojis/símbolos
 function normalizeNoEmoji(t) {
   return (t || "")
     .toLowerCase()
@@ -469,37 +475,23 @@ function normalizeNoEmoji(t) {
     .trim();
 }
 
-// ✅ FIX: Resolver cuando Meta manda el *title* (ej: "🤖 Quiero un bot") en vez del id ("goal_bot")
+// ✅ FIX: si el botón llega como "title" (Quiero un bot) en vez del id (goal_bot)
 function resolveActionId(userText, tNorm) {
   const raw = String(userText || "").trim();
   if (!raw) return "";
 
-  // Si ya viene como id, perfecto:
-  const knownIds = new Set([
-    "goal_bot",
-    "goal_demo",
-    "goal_prices",
-    "close_demo",
-    "close_quote",
-    "close_human",
-  ]);
-  if (knownIds.has(raw)) return raw;
+  const known = new Set(["goal_bot", "goal_demo", "goal_prices", "close_demo", "close_quote", "close_human"]);
+  if (known.has(raw)) return raw;
 
   const n = normalizeNoEmoji(raw);
   const tn = normalizeNoEmoji(tNorm || raw);
 
-  // Main menu (por texto/título)
-  if (n === "quiero un bot" || tn === "quiero un bot" || tn.includes("quiero un bot")) return "goal_bot";
-  if (n === "agendar demo" || tn === "agendar demo" || tn.includes("agendar demo") || tn.includes("agenda demo"))
-    return "goal_demo";
+  if (n === "quiero un bot" || tn.includes("quiero un bot")) return "goal_bot";
+  if (n === "agendar demo" || tn.includes("agendar demo") || tn.includes("agenda demo")) return "goal_demo";
 
-  // Close menu (por texto/título)
-  if (n === "cotizacion" || tn.includes("cotizacion") || tn.includes("cotización")) return "close_quote";
-  if (n.includes("hablar humano") || tn.includes("hablar humano") || tn === "humano") return "close_human";
-  if (n.includes("agendar demo") || tn.includes("agendar demo") || tn.includes("agenda demo")) return "close_demo";
-
-  // Info/precios (si alguna vez lo agregas al menu)
-  if (tn.includes("precio") || tn.includes("precios") || tn.includes("info")) return "";
+  if (tn.includes("cotizacion") || tn.includes("cotización")) return "close_quote";
+  if (tn.includes("hablar humano") || tn === "humano") return "close_human";
+  if (tn.includes("agendar demo") || tn.includes("agenda demo")) return "close_demo";
 
   return "";
 }
@@ -1220,6 +1212,7 @@ app.post("/webhook", async (req, res) => {
       }
 
       try {
+        // ✅ Dedupe por msg.id
         const waMessageId = (msg && msg.id) || "";
         if (waMessageId) {
           const dup = await isDuplicateWaMessage(String(waMessageId));
@@ -1237,7 +1230,7 @@ app.post("/webhook", async (req, res) => {
 
         if (!userText) return;
 
-        // ✅ FIX: convertir títulos (ej "🤖 Quiero un bot") a ids (goal_bot)
+        // ✅ FIX: id/título de botones
         const resolved = resolveActionId(userText, tNorm);
         const userKey = resolved || userText;
 
@@ -1305,7 +1298,6 @@ app.post("/webhook", async (req, res) => {
 
         const label = mapIdToLabel(userKey);
 
-        // ✅ Aquí usamos userKey (id resuelto) en vez de userText
         if (userKey === "goal_bot") {
           session.goal = "Quiero un bot";
           await waSendText(from, `Perfecto ✅ Vamos a elegir el bot ideal.`);
